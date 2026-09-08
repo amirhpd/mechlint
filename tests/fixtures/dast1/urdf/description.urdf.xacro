@@ -1,0 +1,293 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="dast_1">
+
+    <!-- VARIABLES -->
+    <xacro:arg name="is_sim" default="true"/>
+    <xacro:property name="path" value="package://description/meshes" />
+    <xacro:property name="scale" value="0.01 0.01 0.01" />
+    <xacro:property name="PI" value="3.14159265359" />
+    <xacro:property name="effort" value="20.0" />
+    <xacro:property name="velocity" value="10.0" />
+
+    <!-- Kinect mount, eye-to-hand. Pose of kinect_link in base_link.
+         BEWARE: this model is not in metres. The meshes are millimetres scaled by
+         0.01, so one unit here is one decimetre, and the arm's 0.71 m reach shows
+         up as 7.14. The tape-measured mount (x -0.9, y 0.31, z 0.39 m) is
+         therefore multiplied by ten below.
+         Pitch is positive because REP-103 rotates +x toward -z about +y, so
+         positive pitch is nose *down*, the opposite sign to the Kinect motor's
+         own convention, where the same 16 degrees of head-down tilt is -16. -->
+    <xacro:property name="kinect_xyz" value="-9.0 3.1 3.9" />
+    <xacro:property name="kinect_rpy" value="0 0.279 0" />
+
+    <!-- Matched to the calibrated intrinsics in kinect/config/kinect_rgb.yaml:
+         2*atan(640/(2*549.996)) = 60.4 degrees. Clip planes are the sensor's real
+         usable range, 0.5..4.0 m, in this model's decimetres. -->
+    <xacro:property name="kinect_hfov" value="1.0542" />
+    <xacro:property name="kinect_clip_near" value="5.0" />
+    <xacro:property name="kinect_clip_far" value="40.0" />
+
+    <xacro:macro name="default_inertial" params="mass">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <mass value="${mass}" />
+            <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0" />
+        </inertial>
+    </xacro:macro>
+
+    <!-- LINKS -->
+    <link name="world"/>
+
+    <link name="base_link">
+        <xacro:default_inertial mass="0.2"/>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/base.stl" scale="${scale}"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/base_collision.stl" scale="${scale}"/>
+            </geometry>              
+        </collision>
+    </link>
+
+    <link name="rotary_link">
+        <xacro:default_inertial mass="0.05"/>
+        <visual>
+            <origin rpy="0 0 ${PI/2}" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/rotary.stl" scale="${scale}"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-${PI/2} 0 -${PI/2}" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/rotary_collision.stl" scale="${scale}"/>
+            </geometry>      
+        </collision>
+    </link>
+
+    <link name="arm_1_link">
+        <xacro:default_inertial mass="0.1"/>
+        <visual>
+            <origin rpy="0 ${PI/2} ${PI}" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/arm_1.stl" scale="${scale}"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="0 ${PI/2} ${PI}" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/arm_1_collision.stl" scale="${scale}"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <link name="arm_2_link">
+        <xacro:default_inertial mass="0.1"/>
+        <visual>
+            <origin rpy="0 ${PI/2} 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/arm_2.stl" scale="${scale}"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="0 ${PI/2} 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/arm_2_collision.stl" scale="${scale}"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <link name="arm_3_link">
+        <xacro:default_inertial mass="0.1"/>
+        <visual>
+            <origin rpy="0 ${PI/2} ${PI}" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/arm_3.stl" scale="${scale}"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="0 ${PI/2} ${PI}" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/arm_3_collision.stl" scale="${scale}"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <!-- TEMPORARY, SIMULATION ONLY. Placeholder for the sixth DOF: carries no mesh
+         of its own, so at joint_6 = 0 the robot looks exactly as it did when the
+         arm had 5 joints. The real joint, with its own geometry and a servo behind
+         it, will replace this. See "The sixth joint" in CLAUDE.md. -->
+    <link name="wrist_link">
+        <xacro:default_inertial mass="0.01"/>
+    </link>
+
+    <link name="gripper_link">
+        <xacro:default_inertial mass="0.05"/>
+        <visual>
+            <origin rpy="-${PI/2} 0 ${PI}" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/gripper_3.stl" scale="${scale}"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-${PI/2} 0 ${PI}" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="${path}/gripper_3_collision.stl" scale="${scale}"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <link name="tip"/>
+
+    <!-- JOINTS -->
+    <joint name="virtual_joint" type="fixed">
+        <parent link="world"/>
+        <child link="base_link"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint> 
+
+    <joint name ="joint_1" type="revolute">
+        <parent link="base_link"/>
+        <child link = "rotary_link"/>
+        <origin xyz="0 0 1.47"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-${PI / 2}" upper="${PI / 2}" 
+               effort="${effort}" velocity="${velocity}"/>
+    </joint>
+
+    <joint name ="joint_2" type="revolute">
+        <parent link="rotary_link"/>
+        <child link = "arm_1_link"/>
+        <origin xyz="0 0 0"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-${PI / 2}" upper="${PI / 2}" 
+               effort="${effort}" velocity="${velocity}"/>
+    </joint>
+
+    <joint name ="joint_3" type="revolute">
+        <parent link="arm_1_link"/>
+        <child link = "arm_2_link"/>
+        <origin xyz="0 0 1.545"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-${PI / 2}" upper="${PI / 2}" 
+               effort="${effort}" velocity="${velocity}"/>
+    </joint>
+
+    <joint name ="joint_4" type="revolute">
+        <parent link="arm_2_link"/>
+        <child link = "arm_3_link"/>
+        <origin xyz="0 0 1.945"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-${PI / 2}" upper="${PI / 2}" 
+               effort="${effort}" velocity="${velocity}"/>
+    </joint>
+
+    <joint name ="joint_5" type="revolute">
+        <parent link="arm_3_link"/>
+        <child link = "wrist_link"/>
+        <origin xyz="0 0 0.88"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-${PI / 2}" upper="${PI / 2}" 
+               effort="${effort}" velocity="${velocity}"/>
+    </joint>
+
+    <joint name ="joint_6" type="revolute">
+        <parent link="wrist_link"/>
+        <child link = "gripper_link"/>
+        <origin xyz="0 0 0"/>
+        <axis xyz="0 1 0"/>
+        <limit lower="-${PI / 2}" upper="${PI / 2}"
+               effort="${effort}" velocity="${velocity}"/>
+    </joint>
+
+    <joint name="virtual_joint_tip" type="fixed">
+        <parent link="gripper_link"/>
+        <child link="tip"/>
+        <origin xyz="0 0 1.75" rpy="0 0 0"/>
+    </joint> 
+
+    <!-- KINECT -->
+    <!-- Present in both modes: the real driver and the simulated sensor publish
+         the same topics in the same frames, so nothing downstream can tell them
+         apart. Only the sensor block below is simulation-only. -->
+    <link name="kinect_link">
+        <xacro:default_inertial mass="0.5"/>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <box size="0.4 2.8 0.7"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <box size="0.4 2.8 0.7"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <!-- Images and clouds are published in the optical convention: z forward out
+         of the lens, x right, y down. kinect_link itself is the ordinary robot
+         convention, x forward. -->
+    <link name="kinect_rgb_optical_frame"/>
+
+    <joint name="kinect_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="kinect_link"/>
+        <origin xyz="${kinect_xyz}" rpy="${kinect_rpy}"/>
+    </joint>
+
+    <joint name="kinect_optical_joint" type="fixed">
+        <parent link="kinect_link"/>
+        <child link="kinect_rgb_optical_frame"/>
+        <origin xyz="0 0 0" rpy="-${PI/2} 0 -${PI/2}"/>
+    </joint>
+
+    <xacro:if value="$(arg is_sim)">
+        <gazebo reference="kinect_link">
+            <sensor name="kinect" type="rgbd_camera">
+                <camera>
+                    <horizontal_fov>${kinect_hfov}</horizontal_fov>
+                    <image>
+                        <width>640</width>
+                        <height>480</height>
+                        <format>R8G8B8</format>
+                    </image>
+                    <clip>
+                        <near>${kinect_clip_near}</near>
+                        <far>${kinect_clip_far}</far>
+                    </clip>
+                </camera>
+                <always_on>1</always_on>
+                <update_rate>30</update_rate>
+                <visualize>true</visualize>
+                <topic>kinect</topic>
+                <!-- kinect_link, not the optical frame. Gazebo renders along the
+                     sensor link's +x and emits the cloud in that same frame, and
+                     gz_frame_id only labels the message, it does not rotate the
+                     data. Naming the optical frame here produced a cloud whose
+                     depth axis was x while every consumer read it as z, which put
+                     the ground plane 16 units underground. The real driver does
+                     publish the optical convention; both are correct in their own
+                     frame and TF reconciles them. -->
+                <gz_frame_id>kinect_link</gz_frame_id>
+            </sensor>
+        </gazebo>
+    </xacro:if>
+
+    <!-- Gazebo (for Humble)-->
+    <gazebo>
+        <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+            <parameters>$(find controller)/config/controller.yaml</parameters>
+        </plugin>
+    </gazebo>
+
+    <!-- Control -->
+    <xacro:include filename="$(find description)/urdf/control.xacro" />
+
+</robot>

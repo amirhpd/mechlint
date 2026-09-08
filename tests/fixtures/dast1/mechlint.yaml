@@ -1,0 +1,39 @@
+# mechlint project config for the DAST-1 fixture.
+#
+# Same content as the example in the plan, with the paths pointing at this
+# fixture directory instead of a checked-out dast_1 workspace. The facts here
+# are in neither the CAD nor the URDF: motors, materials, payload, mounting.
+
+robot:
+  description: urdf/description.urdf.xacro
+  xacro_args: { is_sim: "true" }
+  package_paths: { description: "." }   # package://description/meshes -> ./meshes
+  model_scale: 0.1                      # decimetres; U001 would tell you
+
+materials:
+  default: { material: pla, infill: 0.30 }
+  links:
+    base_link: { measured_mass_g: 210 }          # weighed on a scale -> overrides the estimate
+
+components:                        # mass that is not in the meshes; a servo sits at the joint it
+  base_link:    [ { actuator: mg996r, drives: joint_1 } ]   # drives, in the parent link, unless
+  rotary_link:  [ { actuator: mg996r, drives: joint_2 } ]   # `at: [x, y, z]` says otherwise
+  arm_1_link:   [ { actuator: mg996r, drives: joint_3 } ]
+  arm_2_link:   [ { actuator: mg996r, drives: joint_4 } ]
+  arm_3_link:   [ { actuator: mg996r, drives: joint_5 } ]
+  gripper_link: [ { mass_g: 30, at: [0, 0, 0.05], note: gripper motor } ]
+
+actuators:
+  voltage: 6.0
+  joints:
+    joint_1: mg996r
+    joint_2: mg996r
+    joint_3: mg996r
+    joint_4: mg996r
+    joint_5: mg996r
+    joint_6: null                  # simulation placeholder, no servo yet -> reported, not judged
+
+scenario:
+  mount: table                     # gravity = -Z of base_link; also wall | ceiling | [gx, gy, gz]
+  payload_g: 100
+  safety_factor: 2.0
