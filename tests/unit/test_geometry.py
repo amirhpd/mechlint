@@ -140,3 +140,12 @@ def test_resolve_scale_accepts_names_and_numbers() -> None:
         units.resolve_scale("furlong")
     with pytest.raises(ValueError, match="must be positive"):
         units.resolve_scale(0.0)
+
+
+def test_a_step_file_is_refused_with_a_hint_not_mis_parsed(tmp_path) -> None:
+    """STEP needs the OCCT kernel and lands in M4; until then say so precisely."""
+    path = tmp_path / "part.STEP"
+    path.write_text("ISO-10303-21;\n")
+
+    with pytest.raises(NotImplementedError, match="M4"):
+        load_mesh(path)

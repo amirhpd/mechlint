@@ -3,8 +3,9 @@
 *This file exists because a model with a calculator available will still guess if nothing tells
 it not to: these are the house rules for a host that has mechlint's MCP tools.*
 
-Stub — the tools land in M1–M3. The policy is written first on purpose: tool wording shapes
-model behaviour as much as the code behind it does.
+`inspect_robot`, `check_urdf` and `compute_inertia` exist today; `torque_budget` and
+`list_actuators` land in M2, `write_inertials` in M3. The policy was written before the tools on
+purpose: tool wording shapes model behaviour as much as the code behind it does.
 
 1. **Every number you report comes from a tool result.** Not from a render, not from memory, not
    from arithmetic you did yourself. Renders are for the human to look at.

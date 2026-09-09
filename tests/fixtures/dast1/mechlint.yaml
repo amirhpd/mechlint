@@ -7,7 +7,10 @@
 robot:
   description: urdf/description.urdf.xacro
   xacro_args: { is_sim: "true" }
-  package_paths: { description: "." }   # package://description/meshes -> ./meshes
+  # package://description/meshes -> ./meshes. `controller` is here only because the
+  # Gazebo plugin block says $(find controller)/config/controller.yaml: xacro has to
+  # resolve every $(find) before mechlint sees any XML, even ones it will ignore.
+  package_paths: { description: ".", controller: "." }
   model_scale: 0.1                      # decimetres; U001 would tell you
 
 materials:

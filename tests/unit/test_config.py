@@ -15,7 +15,7 @@ def test_the_dast1_example_parses(dast1_config: Path) -> None:
 
     assert cfg.robot.description == Path("urdf/description.urdf.xacro")
     assert cfg.robot.xacro_args == {"is_sim": "true"}
-    assert cfg.robot.package_paths == {"description": Path(".")}
+    assert cfg.robot.package_paths == {"description": Path("."), "controller": Path(".")}
     assert cfg.robot.model_scale == pytest.approx(0.1)
 
     assert cfg.materials.default.material == "pla"

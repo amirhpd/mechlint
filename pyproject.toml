@@ -35,10 +35,12 @@ step = ["build123d>=0.9"]
 # Dynamic torques (RNEA) and self-collision. Roadmap, not v1.
 dyn = ["pin>=3.0"]
 # MCP server, so an LLM host can call the same functions.
-mcp = ["mcp>=1.9"]
+# 2.0 renamed FastMCP to MCPServer; the server module uses the new name.
+mcp = ["mcp>=2.0"]
 
 [project.scripts]
 mechlint = "mechlint.cli.main:app"
+mechlint-mcp = "mechlint.mcp.server:main"
 
 [project.urls]
 Homepage = "https://github.com/amirhpd/mechlint"

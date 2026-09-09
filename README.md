@@ -4,9 +4,9 @@
 checks them against actuator and printing limits, and exposes all of it to an LLM, so the model
 answers *"does this servo have enough torque?"* with numbers from a tool, not a guess.**
 
-> **Status: pre-alpha, M0.** The skeleton, the test fixture and the CLI surface exist. The
-> commands themselves are being built — each one tells you which milestone it lands in. Nothing
-> here is on PyPI yet.
+> **Status: pre-alpha, M1.** `inertia`, `urdf-check` and `check` work, over the CLI and over
+> MCP. `torque`, `actuators`, `drift` and `render` are stubs that tell you which milestone they
+> land in. Nothing here is on PyPI yet.
 
 The unit of work is **the joint, not the part**. Every existing CAD-agent tool works on one
 part; robot questions need the whole kinematic chain — what is downstream of this joint, how
@@ -53,17 +53,50 @@ a tool result.
 
 ## Commands
 
-| Question | Command | Lands in |
+| Question | Command | Status |
 |---|---|---|
-| How heavy is each link, and what is its inertia tensor in the link frame? | `mechlint inertia` | M1 |
-| Is my URDF physically sane — units, tensors, masses, meshes? | `mechlint urdf-check` | M1 |
-| Run everything and fail CI if anything fails. | `mechlint check` | M1 |
+| How heavy is each link, and what is its inertia tensor in the link frame? | `mechlint inertia` | **works** |
+| Is my URDF physically sane — units, tensors, masses, meshes? | `mechlint urdf-check` | **works** |
+| Run everything and fail CI if anything fails. | `mechlint check` | **works** |
 | Does servo X hold joint N at the worst pose, with payload P, at voltage V? | `mechlint torque` | M2 |
 | Which servos in the database would? | `mechlint actuators` | M2 |
 | Does the URDF still match the CAD after I changed a part? | `mechlint drift` | M4 |
 | Show me the arm at the worst-case pose. | `mechlint render` | M4 |
 
 Exit codes: `0` all checks passed, `1` a check failed, `2` usage error or unimplemented command.
+Every command takes `--format table|json|markdown`, and any of them can be pointed at a robot
+three ways: a `mechlint.yaml`, a URDF or xacro path, or both with the arguments winning.
+
+```bash
+mechlint urdf-check                      # reads ./mechlint.yaml
+mechlint check robot.urdf.xacro -s dm -p description=src/description
+mechlint inertia --write src/description/urdf/    # generates inertials.xacro, nothing else
+```
+
+`inertia --write` is the only thing mechlint ever writes, and it refuses to overwrite a file it
+did not generate. What it produces is one `xacro:macro` per link, so you include the file and
+swap in the links you accept, one at a time, and see each in the diff.
+
+## From a chat
+
+Install the extra and point your host at the server:
+
+```bash
+uv tool install "mechlint[mcp]"    # provides mechlint-mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "mechlint": { "command": "mechlint-mcp", "args": [] }
+  }
+}
+```
+
+`inspect_robot`, `check_urdf` and `compute_inertia` are exposed today, all annotated read-only;
+`torque_budget` and `list_actuators` join them in M2. Each takes the same `config` /
+`description` / `model_scale` arguments the CLI does, so a what-if question never edits your
+file. [`docs/llms.md`](docs/llms.md) is the policy the host model should follow.
 
 ## Non-goals
 
@@ -100,12 +133,14 @@ exactly what ROS uses — URDF or xacro, `package://` URIs, mesh `scale`, joint 
 ## Development
 
 ```bash
-uv sync              # create the venv and install everything, including dev tools
+uv sync --extra mcp  # create the venv and install everything, including dev tools
 uv run pytest        # the suite
 uv run ruff check .  # lint
 uv run ruff format . # format
 uv run mechlint --help
 ```
+
+Without `--extra mcp` the suite still passes; the MCP tests skip themselves.
 
 There is no CI workflow yet; run the three commands above before pushing.
 

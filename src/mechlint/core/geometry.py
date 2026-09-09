@@ -1,7 +1,10 @@
 """Mass properties from geometry.
 
-Meshes (STL, OBJ, PLY — anything trimesh reads) today; STEP arrives with the
-``[step]`` extra. Results are SI: metres, kilograms, kg*m^2.
+Meshes (STL, OBJ, PLY -- anything trimesh reads) today. STEP is recognised and
+refused with a hint rather than mis-parsed: reading it needs the OCCT kernel
+behind the ``[step]`` extra, and it earns its keep in M4, where ``drift``
+compares hole positions that a mesh simply does not carry. Results are SI:
+metres, kilograms, kg*m^2.
 
 The caller says how big one mesh unit is, in metres, via ``scale``. A part
 exported from CAD in millimetres is ``scale=units.MM``. Nothing here guesses.
@@ -22,6 +25,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 Vec3 = tuple[float, float, float]
 Mat3 = tuple[Vec3, Vec3, Vec3]
+
+#: Recognised so the failure says "not yet" instead of "could not parse".
+STEP_SUFFIXES = frozenset({".step", ".stp"})
 
 
 class MassProperties(BaseModel):
@@ -80,6 +86,11 @@ def load_mesh(path: str | Path) -> trimesh.Trimesh:
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"mesh not found: {path}")
+    if path.suffix.lower() in STEP_SUFFIXES:
+        raise NotImplementedError(
+            f"{path.name} is a STEP file, which mechlint cannot read yet (planned for M4, "
+            "with the [step] extra). Export the same part as STL and point the URDF at that."
+        )
     loaded: Any = trimesh.load(path, force="mesh")
     if not isinstance(loaded, trimesh.Trimesh):
         raise ValueError(f"{path} did not load as a mesh (got {type(loaded).__name__})")

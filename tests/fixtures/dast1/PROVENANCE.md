@@ -35,6 +35,11 @@ author's colcon install space; that single `<parameters>` line was rewritten bac
 `package://controller/config/controller.yaml` so the fixture is machine-independent. Nothing else
 was touched, and mechlint does not read that element.
 
+`mechlint.yaml` differs from the plan's example in one place: `robot.package_paths` also maps
+`controller` to this directory. mechlint ignores the Gazebo plugin block, but xacro has to
+resolve every `$(find ...)` in the file before mechlint sees any XML at all, so the package still
+needs a path when the xacro input path is exercised.
+
 ## Why this robot is a good fixture
 
 It is wrong in useful ways — every one of these is a check mechlint has to catch:
@@ -100,8 +105,11 @@ a25605865c933131a415202cbb20c81b6c3fc88ab756973ddc46ac160b17ffa6  urdf/descripti
 
 ## Refreshing this fixture
 
-0. Source ROS, which `dast_1` needs for `$(find ...)` but mechlint itself never does:
-   `source /opt/ros/<distro>/setup.bash && source install/setup.bash` from the dast_1 root.
+0. Source ROS, which the `xacro` command line below needs for `$(find ...)`. mechlint itself
+   never does: it resolves those from `robot.package_paths`, which is why
+   `mechlint check` runs against `urdf/description.urdf.xacro` in a shell that has never heard
+   of ROS. `source /opt/ros/<distro>/setup.bash && source install/setup.bash` from the dast_1
+   root.
 1. Re-copy the meshes and xacro from the dast_1 commit you want to pin.
 2. Re-run the `xacro` command above and re-apply the `package://controller/...` substitution.
 3. Re-run `pytest tests/` and update the recorded numbers that legitimately changed.
