@@ -19,6 +19,8 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from mechlint.core import chain, units
+from mechlint.core.actuators import ActuatorDatabase
+from mechlint.core.actuators import bundled as bundled_actuators
 from mechlint.core.config import MechlintConfig
 from mechlint.core.geometry import mass_properties
 from mechlint.core.urdf import RobotModel
@@ -89,6 +91,20 @@ CHECKS: dict[str, CheckSpec] = {
             "T001",
             "Static torque exceeds the actuator's stall torque over the safety factor",
             "Stronger servo, mass moved inboard, or a shorter link.",
+        ),
+        CheckSpec(
+            "D002",
+            "Declared mounting disagrees with the model",
+            "scenario.mount and the world-to-base rotation say different things about which "
+            "way is down. The model wins, because it is what the simulator runs -- fix "
+            "whichever of the two is stale.",
+        ),
+        CheckSpec(
+            "D003",
+            "mechlint.yaml names something the model does not have",
+            "A link or joint in the config does not exist in the description. Usually a "
+            "rename on one side only -- and a silently ignored motor is a torque number "
+            "that is wrong in the safe-looking direction.",
         ),
         CheckSpec(
             "D001",
@@ -169,26 +185,144 @@ class CheckReport(BaseModel):
 # --------------------------------------------------------------------------- checks
 
 
-def check_urdf(model: RobotModel, config: MechlintConfig | None = None) -> CheckReport:
-    """Run every URDF and mesh check that does not need an actuator database."""
+def check_urdf(
+    model: RobotModel,
+    config: MechlintConfig | None = None,
+    *,
+    actuators: ActuatorDatabase | None = None,
+) -> CheckReport:
+    """Every check that can be answered without computing torque."""
+    database = actuators or bundled_actuators()
     findings = [
         *_u001_scale(model),
         *_tensor_checks(model),
         *_u005_placeholder_tensors(model),
         *_u006_masses(model),
+        *_u007_effort_limits(model, config, database),
         *_m001_meshes(model),
+        *_d002_mounting(model, config),
+        *_d003_names(model, config),
     ]
+    skipped = {
+        "T001": "static torque is its own command: run `mechlint torque`",
+        "D001": "drift arrives in M4",
+    }
+    if config is None or not any(config.actuators.joints.values()):
+        skipped["U007"] = "needs actuators.joints in mechlint.yaml to say which servo is where"
     return CheckReport(
         robot=model.name,
         source=model.path,
         model_scale=model.model_scale,
         findings=findings,
-        skipped={
-            "U007": "needs actuators.joints and the actuator database (M2)",
-            "T001": "torque arrives in M2",
-            "D001": "drift arrives in M4",
-        },
+        skipped=skipped,
     )
+
+
+def _u007_effort_limits(
+    model: RobotModel, config: MechlintConfig | None, actuators: ActuatorDatabase
+) -> Iterator[Finding]:
+    """Does ``<limit effort>`` claim more torque than the assigned servo can produce?
+
+    The effort limit is what a controller clamps its command to, so a fictional one
+    means the clamp never engages and the joint is tuned against a motor nobody owns.
+    URDF states effort in N*m whatever length unit the model uses, so this comparison
+    needs no scaling -- and stall torque is the right side to compare against, not
+    rated torque: the limit is a ceiling, and stall is the ceiling.
+    """
+    if config is None:
+        return
+    voltage = config.actuators.voltage
+    for name, key in config.actuators.joints.items():
+        joint = model.urdf.joint_map.get(name)
+        if not key or joint is None:
+            continue
+        effort = getattr(getattr(joint, "limit", None), "effort", None)
+        if effort is None:
+            continue
+        try:
+            actuator = actuators[key]
+        except KeyError as error:
+            yield finding("U007", Severity.FAIL, name, str(error))
+            continue
+        limit = actuator.torque_limit(voltage)
+        if float(effort) > limit.torque_Nm * (1.0 + 1e-9):
+            yield finding(
+                "U007",
+                Severity.FAIL,
+                name,
+                f"<limit effort> is {float(effort):g} N*m, but {actuator.name} gives "
+                f"{limit.torque_Nm:.3g} N*m ({limit.basis}) -- "
+                f"{float(effort) / limit.torque_Nm:.3g}x what the servo can deliver",
+            )
+
+
+def _d003_names(model: RobotModel, config: MechlintConfig | None) -> Iterator[Finding]:
+    """Every link and joint ``mechlint.yaml`` mentions has to exist in the model.
+
+    ``extra="forbid"`` on the schema catches a mistyped *key*; nothing catches a
+    mistyped link *name*, and a servo attached to a link that does not exist is
+    simply dropped -- quietly making the robot lighter than it is.
+    """
+    if config is None:
+        return
+    links = set(model.urdf.link_map)
+    joints = set(model.urdf.joint_map)
+
+    for where, names, known, kind in (
+        ("materials.links", config.materials.links, links, "link"),
+        ("components", config.components, links, "link"),
+        ("actuators.joints", config.actuators.joints, joints, "joint"),
+    ):
+        for name in names:
+            if name not in known:
+                yield finding(
+                    "D003",
+                    Severity.FAIL,
+                    f"{where}.{name}",
+                    f"the model has no {kind} called {name!r}",
+                )
+
+    for link, entries in config.components.items():
+        for entry in entries:
+            if entry.drives is not None and entry.drives not in joints:
+                yield finding(
+                    "D003",
+                    Severity.FAIL,
+                    f"components.{link}",
+                    f"drives {entry.drives!r}, which is not a joint in the model",
+                )
+
+
+def _d002_mounting(model: RobotModel, config: MechlintConfig | None) -> Iterator[Finding]:
+    """Does ``scenario.mount`` agree with how the model is actually bolted down?
+
+    Only a grounded model can disagree with anything: without a world frame there is
+    nothing to compare the config against, and the config is simply the answer.
+    """
+    if config is None or not chain.is_grounded(model.urdf):
+        return
+    derived = chain.gravity(model.urdf)
+    try:
+        declared = chain.mount_gravity(config.scenario.mount)
+    except ValueError as error:
+        yield finding("D002", Severity.FAIL, "scenario.mount", str(error))
+        return
+
+    if np.allclose(derived.array, declared, atol=1e-6):
+        return
+    yield finding(
+        "D002",
+        Severity.WARN,
+        "scenario.mount",
+        f"config says {_mount_text(config.scenario.mount)} = {_fmt(declared)} m/s^2, but the "
+        f"model mounts {chain.mounted_link(model.urdf)} so that gravity is "
+        f"{_fmt(derived.array)}{f' ({derived.implied_mount})' if derived.implied_mount else ''}; "
+        "mechlint used the model",
+    )
+
+
+def _mount_text(mount: object) -> str:
+    return mount if isinstance(mount, str) else f"{tuple(mount)}"
 
 
 def _u001_scale(model: RobotModel) -> Iterator[Finding]:

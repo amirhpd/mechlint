@@ -25,16 +25,18 @@ from mechlint.core.urdf import PackageResolver, RobotModel
 
 runner = CliRunner()
 
-#: PLA at 1240 kg/m^3 and the 30 % infill in the fixture's mechlint.yaml.
-#: base_link is 210 g because it was weighed; the rest are estimates.
+#: PLA at 1240 kg/m^3 and the 30 % infill in the fixture's mechlint.yaml, plus the
+#: components declared there: a 55 g MG996R from the actuator database on each of the
+#: first five links, and a 30 g gripper motor given as a literal mass.
+#: base_link's shell is 210 g because it was weighed; the rest are estimates.
 #: arm_1 and base come from a convex hull, so they are upper bounds (M001).
 MASS_BASELINE_G = {
-    "base_link": 210.000,
-    "rotary_link": 11.908,
-    "arm_1_link": 123.139,
-    "arm_2_link": 38.887,
-    "arm_3_link": 35.982,
-    "gripper_link": 43.278,
+    "base_link": 265.000,
+    "rotary_link": 66.908,
+    "arm_1_link": 178.139,
+    "arm_2_link": 93.887,
+    "arm_3_link": 90.982,
+    "gripper_link": 43.277,
     "kinect_link": 291.648,
 }
 
@@ -107,14 +109,6 @@ def test_m001_names_the_two_open_meshes(model: RobotModel, config: MechlintConfi
     assert open_meshes == {"arm_1.stl", "base.stl"}
 
 
-def test_u007_is_reported_as_not_run_rather_than_passing(
-    model: RobotModel, config: MechlintConfig
-) -> None:
-    """DAST-1 declares effort=20 N*m on every joint against an MG996R's ~1.1 N*m.
-    That is exactly U007, and silence about it would read as a pass."""
-    assert "U007" in check_urdf(model, config).skipped
-
-
 # --------------------------------------------------------------------------- inertia
 
 
@@ -131,7 +125,8 @@ def test_the_measured_mass_wins_over_the_estimate(
     base = next(link for link in compute_inertia(model, config).links if link.link == "base_link")
 
     assert base.mass_source == "measured"
-    assert base.mass_kg == pytest.approx(0.210)
+    assert base.shell_mass_kg == pytest.approx(0.210)
+    assert base.mass_kg == pytest.approx(0.265)  # the weighed shell plus the servo on top
     assert base.convex_hull_fallback  # base.stl is open, so the shape is still a hull
 
 
@@ -144,8 +139,8 @@ def test_the_kinect_on_its_stick_is_not_part_of_what_the_joints_hold(
     report = compute_inertia(model, config)
 
     assert set(report.uncarried_links) == {"base_link", "kinect_link"}
-    assert report.carried_mass_kg == pytest.approx(0.2632, abs=1e-4)
-    assert report.total_mass_kg == pytest.approx(0.7648, abs=1e-4)
+    assert report.carried_mass_kg == pytest.approx(0.4832, abs=1e-4)
+    assert report.total_mass_kg == pytest.approx(1.0398, abs=1e-4)
 
 
 def test_the_two_totals_add_up(model: RobotModel, config: MechlintConfig) -> None:
@@ -161,17 +156,21 @@ def test_the_table_shows_both_totals(model: RobotModel, config: MechlintConfig) 
 
     table = render_inertia(compute_inertia(model, config))
 
-    assert "carried by a joint           263.2 g" in table
-    assert "not carried                  501.6 g   base_link, kinect_link" in table
+    assert "carried by a joint           483.2 g" in table
+    assert "not carried                  556.6 g   base_link, kinect_link" in table
 
 
-def test_the_five_servos_are_reported_missing_not_silently_omitted(
+def test_the_five_servos_get_their_mass_from_the_actuator_database(
     model: RobotModel, config: MechlintConfig
 ) -> None:
-    pending = compute_inertia(model, config).pending_components
+    """mechlint.yaml names `actuator: mg996r` and no mass. M2 is what makes that resolve."""
+    report = compute_inertia(model, config)
+    servos = [c for link in report.links for c in link.components if c.label == "mg996r"]
 
-    assert len(pending) == 5
-    assert {p.label for p in pending} == {"mg996r"}
+    assert report.pending_components == []
+    assert len(servos) == 5
+    assert all(c.mass_kg == pytest.approx(0.055) for c in servos)
+    assert all("actuator db" in (c.source or "") for c in servos)
 
 
 def test_an_inertial_is_written_for_every_link_with_geometry(
@@ -231,7 +230,10 @@ def test_the_generated_inertials_clear_the_tensor_checks(
 
     remaining = {f.check for f in check_urdf(model, config).findings}
 
-    assert remaining == {"U001", "M001"}  # the model is still in decimetres, meshes still open
+    # The model is still in decimetres, the meshes are still open, and every joint still
+    # claims effort="20.0" against a servo that gives 1.079 N*m -- none of which is
+    # something an <inertial> block could have fixed.
+    assert remaining == {"U001", "M001", "U007"}
 
 
 # --------------------------------------------------------------------------- the CLI
@@ -243,7 +245,8 @@ def test_the_cli_finds_its_own_config(dast1_dir: Path, tmp_path: Path) -> None:
     payload = json.loads(result.output)
 
     assert result.exit_code == 1
-    assert payload["robot"] == "dast_1"
+    assert payload["checks"]["robot"] == "dast_1"
+    assert payload["torque"]["robot"] == "dast_1"
     assert payload["ok"] is False
 
 

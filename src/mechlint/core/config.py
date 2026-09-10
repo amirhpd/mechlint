@@ -20,7 +20,11 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 Vec3 = tuple[float, float, float]
 
-Mount = Literal["table", "wall", "ceiling"]
+#: Only the mountings a single name can actually pin down. A wall mount leaves gravity
+#: free to point any horizontal direction in the base frame, depending on how the robot
+#: is rolled about its mounting axis, so it is spelled as an explicit vector -- or, far
+#: better, left to the world-to-base rotation in the model, which already says it.
+Mount = Literal["table", "ceiling"]
 
 
 class _Strict(BaseModel):
@@ -106,7 +110,10 @@ class Scenario(_Strict):
     """The load case every torque number is computed for."""
 
     mount: Mount | Vec3 = Field(
-        default="table", description="Named mounting, or an explicit gravity vector in base_link."
+        default="table",
+        description="Named mounting, or an explicit gravity vector in the base frame. Only "
+        "consulted when the model is not grounded: a URDF with a world frame already states "
+        "its mounting in the world-to-base rotation, and check D002 reports a disagreement.",
     )
     payload_g: float = Field(default=0.0, ge=0.0, description="Mass held at the tip.")
     safety_factor: float = Field(
@@ -121,6 +128,11 @@ class MechlintConfig(_Strict):
     """A whole ``mechlint.yaml``."""
 
     robot: RobotConfig
+    actuator_db: Path | None = Field(
+        default=None,
+        description="This project's own actuator YAML, merged over the bundled table. "
+        "Relative to this file. Put a servo mechlint has never heard of here.",
+    )
     materials: MaterialsConfig = Field(default_factory=MaterialsConfig)
     components: dict[str, list[Component]] = Field(default_factory=dict)
     actuators: ActuatorsConfig = Field(default_factory=ActuatorsConfig)
@@ -158,3 +170,7 @@ class MechlintConfig(_Strict):
     @property
     def description_path(self) -> Path:
         return self.resolve(self.robot.description)
+
+    @property
+    def actuator_db_path(self) -> Path | None:
+        return None if self.actuator_db is None else self.resolve(self.actuator_db)

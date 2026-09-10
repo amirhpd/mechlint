@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from mechlint.core.checks import CHECKS, Severity, check_urdf
+from mechlint.core.config import MechlintConfig
 from mechlint.core.urdf import RobotModel
 from tests.unit.urdf_builder import box, inertial, write_urdf
 
@@ -219,6 +223,57 @@ def test_a_pure_frame_needs_no_inertial(tmp_path: Path) -> None:
     assert _check(tmp_path, body).findings == []
 
 
+# --------------------------------------------------------------------------- D002
+
+GROUNDED = SANE.replace(
+    '<link name="base">',
+    '<link name="world"/>'
+    '<joint name="anchor" type="fixed">'
+    '<parent link="world"/><child link="base"/><origin xyz="0 0 0" rpy="{rpy}"/></joint>'
+    '<link name="base">',
+)
+
+
+def _with_mount(tmp_path: Path, rpy: str, mount: str):
+    config = tmp_path / "mechlint.yaml"
+    config.write_text(f"robot: {{ description: test.urdf }}\nscenario: {{ mount: {mount} }}\n")
+    model = RobotModel.load(write_urdf(tmp_path, GROUNDED.format(rpy=rpy)))
+    return check_urdf(model, MechlintConfig.from_yaml(config))
+
+
+def test_d002_stays_quiet_when_the_config_and_the_model_agree(tmp_path: Path) -> None:
+    assert "D002" not in _ids(_with_mount(tmp_path, "0 0 0", "table"))
+
+
+def test_d002_reports_a_config_that_contradicts_the_model(tmp_path: Path) -> None:
+    """The model wins -- it is the rotation the simulator runs -- so this warns and says
+    which one was used, rather than failing or silently believing the file."""
+    report = _with_mount(tmp_path, "0 0 0", "ceiling")
+    d002 = next(f for f in report.findings if f.check == "D002")
+
+    assert d002.severity is Severity.WARN
+    assert "mechlint used the model" in d002.message
+    assert report.ok
+
+
+def test_d002_needs_a_world_frame_to_disagree_with(tmp_path: Path) -> None:
+    """Without one there is nothing to compare against, and the config is just the answer."""
+    config = tmp_path / "mechlint.yaml"
+    config.write_text("robot: { description: test.urdf }\nscenario: { mount: ceiling }\n")
+    model = RobotModel.load(write_urdf(tmp_path, SANE))
+
+    assert "D002" not in _ids(check_urdf(model, MechlintConfig.from_yaml(config)))
+
+
+def test_a_wall_mount_is_rejected_by_the_schema(tmp_path: Path) -> None:
+    """One word cannot say which horizontal direction is down, so the name is gone."""
+    config = tmp_path / "mechlint.yaml"
+    config.write_text("robot: { description: test.urdf }\nscenario: { mount: wall }\n")
+
+    with pytest.raises(ValidationError):
+        MechlintConfig.from_yaml(config)
+
+
 # --------------------------------------------------------------------------- reporting
 
 
@@ -242,3 +297,78 @@ def test_warnings_alone_do_not_turn_ci_red(tmp_path: Path) -> None:
 
     assert _ids(report) == {"U001"}
     assert report.ok
+
+
+# --------------------------------------------------------------------------- U007, D003
+
+
+def _with_config(tmp_path: Path, yaml: str, body: str = SANE):
+    path = tmp_path / "mechlint.yaml"
+    path.write_text("robot: { description: test.urdf }\n" + yaml)
+    model = RobotModel.load(write_urdf(tmp_path, body))
+    return check_urdf(model, MechlintConfig.from_yaml(path))
+
+
+def test_u007_catches_an_effort_limit_no_servo_can_reach(tmp_path: Path) -> None:
+    """The SANE arm declares effort=5 N*m. An MG996R gives 1.079 N*m at 6 V, so a
+    controller clamping at 5 never clamps at all."""
+    report = _with_config(tmp_path, "actuators: { voltage: 6.0, joints: { j1: mg996r } }")
+    (u007,) = [f for f in report.findings if f.check == "U007"]
+
+    assert u007.severity is Severity.FAIL
+    assert u007.subject == "j1"
+    assert "4.63x" in u007.message
+    assert "stall torque at 6 V" in u007.message
+
+
+def test_u007_is_quiet_when_the_limit_is_honest(tmp_path: Path) -> None:
+    body = SANE.replace('effort="5"', 'effort="1.0"')
+    report = _with_config(tmp_path, "actuators: { voltage: 6.0, joints: { j1: mg996r } }", body)
+
+    assert "U007" not in _ids(report)
+
+
+def test_u007_says_it_did_not_run_rather_than_passing(tmp_path: Path) -> None:
+    """Silence about a check nobody gave the inputs for reads as a pass. It is not one."""
+    assert "U007" in _with_config(tmp_path, "actuators: { joints: { j1: null } }").skipped
+    assert "U007" in _check(tmp_path, SANE).skipped
+
+
+def test_d003_catches_a_link_renamed_on_one_side_only(tmp_path: Path) -> None:
+    """`extra: forbid` catches a mistyped key. Nothing else catches a mistyped link name,
+    and a servo on a link that does not exist is silently dropped -- which makes the robot
+    lighter than it is, in the direction that looks safe."""
+    report = _with_config(tmp_path, "components: { bass: [{ mass_g: 55, at: [0, 0, 0] }] }")
+    (d003,) = [f for f in report.findings if f.check == "D003"]
+
+    assert d003.severity is Severity.FAIL
+    assert d003.subject == "components.bass"
+    assert "no link called 'bass'" in d003.message
+
+
+def test_d003_covers_materials_and_actuator_assignments(tmp_path: Path) -> None:
+    report = _with_config(
+        tmp_path,
+        "materials: { links: { nope: { infill: 0.3 } } }\nactuators: { joints: { j9: mg996r } }",
+    )
+    subjects = {f.subject for f in report.findings if f.check == "D003"}
+
+    assert subjects == {"materials.links.nope", "actuators.joints.j9"}
+
+
+def test_d003_catches_a_servo_driving_a_joint_that_is_not_there(tmp_path: Path) -> None:
+    report = _with_config(tmp_path, "components: { base: [{ actuator: mg996r, drives: j9 }] }")
+    (d003,) = [f for f in report.findings if f.check == "D003"]
+
+    assert "not a joint in the model" in d003.message
+
+
+def test_a_config_that_matches_the_model_says_nothing(tmp_path: Path) -> None:
+    report = _with_config(
+        tmp_path,
+        "materials: { links: { base: { infill: 0.3 } } }\n"
+        "components: { base: [{ actuator: mg996r, drives: j1 }] }\n"
+        "actuators: { voltage: 6.0, joints: { j1: null } }",
+    )
+
+    assert "D003" not in _ids(report)

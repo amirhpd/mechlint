@@ -37,6 +37,8 @@ actuators:
     joint_6: null                  # simulation placeholder, no servo yet -> reported, not judged
 
 scenario:
-  mount: table                     # gravity = -Z of base_link; also wall | ceiling | [gx, gy, gz]
+  # Only read when a model has no world frame. This one has, so the world-to-base
+  # rotation decides which way is down and D002 would flag a disagreement.
+  mount: table                     # or ceiling, or an explicit [gx, gy, gz]
   payload_g: 100
   safety_factor: 2.0

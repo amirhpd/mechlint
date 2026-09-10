@@ -20,7 +20,7 @@ import pytest
 
 mcp_server = pytest.importorskip("mechlint.mcp.server", reason="needs the optional [mcp] extra")
 
-TOOLS = {"inspect_robot", "check_urdf", "compute_inertia"}
+TOOLS = {"inspect_robot", "check_urdf", "compute_inertia", "torque_budget", "list_actuators"}
 
 
 def call(name: str, **arguments: Any) -> dict[str, Any]:
@@ -37,7 +37,7 @@ def config(dast1_dir: Path) -> str:
     return str(dast1_dir / "mechlint.yaml")
 
 
-def test_the_three_m1_tools_are_exposed() -> None:
+def test_every_tool_built_so_far_is_exposed() -> None:
     assert {tool.name for tool in listed()} == TOOLS
 
 
@@ -75,9 +75,9 @@ def test_check_urdf_returns_findings_with_ids_and_fixes(config: str) -> None:
     findings = {f["check"]: f for f in payload["findings"]}
 
     assert payload["ok"] is False
-    assert {"U001", "U005", "U006", "M001"} <= set(findings)
+    assert {"U001", "U005", "U006", "U007", "M001"} <= set(findings)
     assert findings["U001"]["fix"]
-    assert "U007" in payload["skipped"]
+    assert "D001" in payload["skipped"]  # silence about an unbuilt check is not a pass
 
 
 def test_compute_inertia_says_where_each_mass_came_from(config: str) -> None:
@@ -86,16 +86,97 @@ def test_compute_inertia_says_where_each_mass_came_from(config: str) -> None:
 
     assert sources["base_link"] == "measured"
     assert sources["arm_2_link"] == "estimated"
-    assert payload["total_mass_kg"] == pytest.approx(0.765, abs=0.001)
+    assert payload["total_mass_kg"] == pytest.approx(1.040, abs=0.001)
 
 
-def test_a_missing_servo_mass_is_visible_in_the_json(config: str) -> None:
-    """A servo silently absent is a torque number that will be wrong in M2."""
+def test_every_servo_mass_resolves_and_says_where_it_came_from(config: str) -> None:
+    """A servo silently absent is a torque number that is wrong in the safe-looking direction."""
     payload = call("compute_inertia", config=config)
-    pending = [c for link in payload["links"] for c in link["components"] if not c["ok"]]
+    components = [c for link in payload["links"] for c in link["components"]]
 
-    assert len(pending) == 5
-    assert all("M2" in component["hint"] for component in pending)
+    assert [c for c in components if not c["ok"]] == []
+    servos = [c for c in components if c["label"] == "mg996r"]
+    assert len(servos) == 5
+    assert all("actuator db" in component["source"] for component in servos)
+
+
+def test_torque_budget_judges_each_joint_against_its_servo(config: str) -> None:
+    payload = call("torque_budget", config=config, payload_g=[0.0, 200.0])
+    joints = {j["joint"]: j for j in payload["joints"]}
+
+    assert payload["ok"] is False
+    assert payload["gravity_source"] == "model"
+    assert joints["joint_2"]["actuator"] == "mg996r"
+    assert joints["joint_2"]["confidence"] == "low"
+    assert joints["joint_2"]["cases"][-1]["ok"] is False
+    assert joints["joint_6"]["cases"][-1]["ok"] is None  # no servo assigned: not judged
+    assert payload["unjudged"] == ["joint_6"]
+
+
+def test_torque_budget_echoes_the_overrides_it_was_given(config: str) -> None:
+    """A what-if answer has to carry its own assumptions or it cannot be quoted."""
+    payload = call("torque_budget", config=config, payload_g=[50.0], voltage=4.8, mount="ceiling")
+
+    assert payload["payloads_g"] == [0.0, 50.0]  # zero is always included: it is the floor
+    assert payload["voltage_V"] == 4.8
+    assert payload["gravity_m_s2"] == pytest.approx([0.0, 0.0, 9.80665])
+    assert payload["joints"][0]["voltage_V"] == 4.8
+
+
+def test_list_actuators_answers_what_would_fit_instead(config: str) -> None:
+    payload = call("list_actuators", min_torque_Nm=2.0, voltage=6.8)
+    keys = [entry["key"] for entry in payload["actuators"]]
+
+    assert keys == ["ds3225", "ds3218", "nema17_pg5"]  # the stepper counts, at 520 g
+    assert all(entry["source_url"] for entry in payload["actuators"])
+    assert payload["actuators"][0]["torque_at_voltage"]["basis"] == "stall torque at 6.8 V"
+
+
+def test_list_actuators_returns_one_entry_with_its_source(config: str) -> None:
+    payload = call("list_actuators", actuator="xl430_w250")
+
+    assert payload["actuator"]["vendor"] == "ROBOTIS"
+    assert payload["actuator"]["confidence"] == "high"
+    assert "robotis.com" in payload["actuator"]["source_url"]
+
+
+def test_list_actuators_also_reads_a_projects_own_table(tmp_path, config: str) -> None:
+    """A project that ships its own servos should see them here, the way the CLI does."""
+    (tmp_path / "my_servos.yaml").write_text(
+        "actuators:\n  hs645:\n    name: HS-645MG\n    vendor: Hitec\n"
+        "    kind: hobby_servo\n    stall_torque_Nm: { 6.0: 0.932 }\n"
+        "    recommended_voltage: 6.0\n    mass_g: 55.2\n"
+        "    source_url: http://example.invalid/hs645\n    source_date: 2026-09-10\n"
+        "    source: invented for a test\n    confidence: low\n"
+    )
+    project = tmp_path / "mechlint.yaml"
+    project.write_text(
+        Path(config).read_text().replace("materials:", "actuator_db: my_servos.yaml\n\nmaterials:")
+    )
+    payload = call("list_actuators", config=str(project))
+
+    assert "hs645" in {entry["key"] for entry in payload["actuators"]}
+    assert "mg996r" in {entry["key"] for entry in payload["actuators"]}
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "expected"),
+    [
+        ("torque_budget", {"description": "does/not/exist.urdf"}, "not found"),
+        ("torque_budget", {}, "give either"),
+        ("list_actuators", {"actuator": "nope"}, "unknown actuator"),
+        ("list_actuators", {"kind": "hobby-servo"}, "unknown kind"),
+    ],
+)
+def test_a_bad_argument_is_a_result_not_a_traceback(
+    tool: str, arguments: dict[str, Any], expected: str
+) -> None:
+    """A tool that raises gives the model a stack trace it cannot act on. These give a
+    sentence it can: what went wrong, in the same {ok, error, hint} shape as every other."""
+    payload = call(tool, **arguments)
+
+    assert payload["ok"] is False
+    assert expected in payload["error"]
 
 
 def test_a_bad_path_is_a_result_not_a_traceback() -> None:

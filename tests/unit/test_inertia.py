@@ -100,15 +100,28 @@ def test_a_component_that_only_names_a_joint_sits_at_that_joint(tmp_path: Path) 
     assert component.at_m == pytest.approx((0.0, 0.0, 0.5))
 
 
-def test_an_actuator_without_a_mass_is_reported_not_dropped(tmp_path: Path) -> None:
-    """A servo silently missing is the difference between right and comfortably wrong."""
+def test_an_actuator_gets_its_mass_from_the_database(tmp_path: Path) -> None:
+    """The whole point of `actuator:` with no `mass_g`: the database knows what it weighs."""
     report = compute_inertia(
         _model(tmp_path), _config(tmp_path, "components: {base: [{actuator: mg996r, drives: j1}]}")
+    )
+    (component,) = next(link for link in report.links if link.link == "base").components
+
+    assert report.pending_components == []
+    assert component.mass_kg == pytest.approx(0.055)
+    assert "MG996R" in component.source
+
+
+def test_an_unknown_actuator_is_reported_not_dropped(tmp_path: Path) -> None:
+    """A servo silently missing is the difference between right and comfortably wrong."""
+    report = compute_inertia(
+        _model(tmp_path), _config(tmp_path, "components: {base: [{actuator: nope, drives: j1}]}")
     )
     (pending,) = report.pending_components
 
     assert pending.ok is False
-    assert "M2" in pending.hint
+    assert "unknown actuator" in pending.error
+    assert "mass_g" in pending.hint
 
 
 def test_a_link_with_nothing_to_compute_from_keeps_its_urdf_mass(tmp_path: Path) -> None:

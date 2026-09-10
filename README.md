@@ -4,8 +4,8 @@
 checks them against actuator and printing limits, and exposes all of it to an LLM, so the model
 answers *"does this servo have enough torque?"* with numbers from a tool, not a guess.**
 
-> **Status: pre-alpha, M1.** `inertia`, `urdf-check` and `check` work, over the CLI and over
-> MCP. `torque`, `actuators`, `drift` and `render` are stubs that tell you which milestone they
+> **Status: pre-alpha, M2.** `inertia`, `urdf-check`, `torque`, `actuators` and `check` work,
+> over the CLI and over MCP. `drift` and `render` are stubs that tell you which milestone they
 > land in. Nothing here is on PyPI yet.
 
 The unit of work is **the joint, not the part**. Every existing CAD-agent tool works on one
@@ -40,7 +40,7 @@ STL for the printer and the URDF — is the primary one.
 
 | Who | How | Gets |
 |---|---|---|
-| A human at a terminal | `mechlint torque --payload-g 100` | A table and an exit code |
+| A human at a terminal | `mechlint torque --payload 100` | A table and an exit code |
 | A human in a chat | Natural language; the LLM calls the MCP tools | An explanation that quotes tool numbers |
 | CI | `mechlint check` in GitHub Actions or `colcon test` | Red or green on the PR |
 
@@ -58,8 +58,8 @@ a tool result.
 | How heavy is each link, and what is its inertia tensor in the link frame? | `mechlint inertia` | **works** |
 | Is my URDF physically sane — units, tensors, masses, meshes? | `mechlint urdf-check` | **works** |
 | Run everything and fail CI if anything fails. | `mechlint check` | **works** |
-| Does servo X hold joint N at the worst pose, with payload P, at voltage V? | `mechlint torque` | M2 |
-| Which servos in the database would? | `mechlint actuators` | M2 |
+| Does servo X hold joint N at the worst pose, with payload P, at voltage V? | `mechlint torque` | **works** |
+| Which servos in the database would? | `mechlint actuators` | **works** |
 | Does the URDF still match the CAD after I changed a part? | `mechlint drift` | M4 |
 | Show me the arm at the worst-case pose. | `mechlint render` | M4 |
 
@@ -71,11 +71,38 @@ three ways: a `mechlint.yaml`, a URDF or xacro path, or both with the arguments 
 mechlint urdf-check                      # reads ./mechlint.yaml
 mechlint check robot.urdf.xacro -s dm -p description=src/description
 mechlint inertia --write src/description/urdf/    # generates inertials.xacro, nothing else
+mechlint torque -P 0 -P 100 -P 200       # one column per payload; 0 g is always included
+mechlint torque --actuator joint_2=ds3225 -V 6.8  # what-if, without editing the file
+mechlint actuators --min-torque 2.0 --max-mass 100 # what would fit instead
 ```
 
 `inertia --write` is the only thing mechlint ever writes, and it refuses to overwrite a file it
 did not generate. What it produces is one `xacro:macro` per link, so you include the file and
 swap in the links you accept, one at a time, and see each in the diff.
+
+## The actuator database
+
+Geometry comes from the CAD and the chain from the URDF, but *how much torque this servo
+delivers at this voltage* exists only on a datasheet — and hobby-servo datasheets are marketing.
+So every entry in [`actuators.yaml`](src/mechlint/data/actuators.yaml) carries the URL it was
+read from, the date it was read, and a confidence, and every report prints that confidence next
+to the margin. A 1.2× margin against a `low`-confidence number is not a pass.
+
+```
+  key          name             torque     mass  conf   basis
+  ds3225       DS3225MG      2.403 N*m     60 g  low    stall torque at 6.8 V
+  xl430_w250   XL430-W250-T  1.400 N*m     57 g  high   stall torque at 11.1 V
+  mg996r       MG996R        1.079 N*m     55 g  low    stall torque at 6 V
+```
+
+Two kinds of limit, because two kinds of motor: a brushed servo's stall torque scales with its
+supply, so it is stored per voltage and never interpolated between listed points; a stepper's is
+set by its driver current, so it gets one holding torque and the current it holds at. Add your
+own with `actuator_db: my_servos.yaml` in `mechlint.yaml`, or `--actuator-db`.
+
+`mechlint torque` is **static** — gravity holding, nothing accelerating — so it under-states a
+moving robot. That is what the safety factor is for, and every report prints it rather than
+folding it silently into the verdict.
 
 ## From a chat
 
@@ -93,10 +120,12 @@ uv tool install "mechlint[mcp]"    # provides mechlint-mcp
 }
 ```
 
-`inspect_robot`, `check_urdf` and `compute_inertia` are exposed today, all annotated read-only;
-`torque_budget` and `list_actuators` join them in M2. Each takes the same `config` /
-`description` / `model_scale` arguments the CLI does, so a what-if question never edits your
-file. [`docs/llms.md`](docs/llms.md) is the policy the host model should follow.
+`inspect_robot`, `check_urdf`, `compute_inertia`, `torque_budget` and `list_actuators` are
+exposed today, all annotated read-only; `write_inertials` joins them in M3. Each takes the same
+`config` / `description` / `model_scale` arguments the CLI does, plus per-call overrides for
+payload, voltage, actuator and mount — so a what-if question never edits your file, and the
+result echoes every override it was given. [`docs/llms.md`](docs/llms.md) is the policy the host
+model should follow.
 
 ## Non-goals
 
@@ -120,7 +149,7 @@ mechlint deliberately does **not** do these, and will point you at the tool that
 | [xacro](https://pypi.org/project/xacro/) | xacro without a sourced ROS shell | Dependency |
 | [Pinocchio](https://github.com/stack-of-tasks/pinocchio) | Rigid-body dynamics (RNEA), collision | Optional extra `[dyn]`, roadmap |
 | STEP-to-URDF converters | One-shot export: STEP in, URDF with inertia out | Complementary — they run once, mechlint re-runs on every change and catches the drift |
-| `check_urdf` (urdfdom) | Structural URDF validation, no physics | `mechlint urdf-check` is a superset; the IDs are designed to be proposed upstream |
+| `check_urdf` (urdfdom) | Structural URDF validation, no physics | `mechlint urdf-check` is a superset; the `U0xx` IDs are designed to be proposed upstream — a `D0xx` never can, because it needs something outside the URDF to disagree with |
 
 ## ROS
 

@@ -1,0 +1,169 @@
+# The actuators a hobby or research arm is actually built from.
+#
+# Every entry carries source_url + source_date + confidence, and every torque is in
+# N*m even where the vendor quotes kgf*cm -- the datasheet figure stays in `source`
+# so the conversion can be checked. 1 kgf*cm = 0.0980665 N*m.
+#
+# Two kinds of torque limit, because two kinds of motor:
+#
+#   stall_torque_Nm   voltage -> N*m.  A brushed servo's torque scales with its supply,
+#                     so the number is meaningless without the voltage it was measured at.
+#   holding_torque_Nm one number.  A stepper's torque is set by the current its driver
+#                     pushes, not by the supply voltage, so keying it by volts would be
+#                     a lie. `rated_current_A` is the condition it holds at.
+#
+# `price_hint` is deliberately empty everywhere. Prices move faster than this file and
+# none of the sources below quote one; an unsourced number sitting in a sourced database
+# is worse than a missing one. Fill it in your own overlay if you track cost.
+#
+# Extend this with your own YAML rather than editing this file:
+#   mechlint torque --actuator-db my_actuators.yaml
+
+actuators:
+
+  mg996r:
+    name: MG996R
+    vendor: TowerPro
+    kind: hobby_servo
+    stall_torque_Nm: { 4.8: 0.922, 6.0: 1.079 }
+    no_load_speed_rpm: { 4.8: 52.6, 6.0: 66.7 }
+    recommended_voltage: 6.0
+    voltage_range: [4.8, 6.6]
+    mass_g: 55.0
+    dims_mm: [40.7, 19.7, 42.9]
+    mounting: standard 40 mm servo, 25T spline
+    interface: PWM
+    source_url: https://servodatabase.com/servo/towerpro/mg996r
+    source_date: 2026-09-09
+    source: "9.4 kgf*cm @ 4.8 V, 11.0 kgf*cm @ 6.0 V; 315.8 deg/s and 400 deg/s no-load."
+    confidence: low
+    note: >-
+      The clone market's most common servo, and its most optimistic datasheet. Treat the
+      stall figure as an upper bound on a good unit; measured samples come in lower, and
+      nothing published says what it can hold continuously.
+
+  ds3218:
+    name: DS3218MG
+    vendor: DSServo
+    kind: hobby_servo
+    stall_torque_Nm: { 5.0: 1.863, 6.8: 2.108 }
+    no_load_speed_rpm: { 5.0: 62.5, 6.8: 71.4 }
+    recommended_voltage: 6.8
+    voltage_range: [4.8, 6.8]
+    mass_g: 60.0
+    dims_mm: [40.0, 20.0, 40.5]
+    mounting: standard 40 mm servo, 25T spline
+    interface: PWM
+    source_url: https://rcdrone.top/products/dsservo-waterproof-servo-ds3218-20kg-ds3225-25kg-ds3235-35kg
+    source_date: 2026-09-09
+    source: "19 kgf*cm @ 5 V, 21.5 kgf*cm @ 6.8 V; 0.16 s/60deg and 0.14 s/60deg no-load."
+    confidence: low
+    note: >-
+      Reseller specification table, not a manufacturer datasheet -- DSServo publishes none.
+      The PRO variant of the same part is quoted higher again, so check which one you have.
+
+  ds3225:
+    name: DS3225MG
+    vendor: DSServo
+    kind: hobby_servo
+    stall_torque_Nm: { 5.0: 2.059, 6.8: 2.403 }
+    no_load_speed_rpm: { 5.0: 66.7, 6.8: 76.9 }
+    recommended_voltage: 6.8
+    voltage_range: [4.8, 6.8]
+    mass_g: 60.0
+    dims_mm: [40.0, 20.0, 40.5]
+    mounting: standard 40 mm servo, 25T spline
+    interface: PWM
+    source_url: https://rcdrone.top/products/dsservo-waterproof-servo-ds3218-20kg-ds3225-25kg-ds3235-35kg
+    source_date: 2026-09-09
+    source: "21 kgf*cm @ 5 V, 24.5 kgf*cm @ 6.8 V; 0.15 s/60deg and 0.13 s/60deg no-load."
+    confidence: low
+    note: >-
+      Same case and same mounting as the DS3218, so it is a drop-in upgrade when a joint
+      is short of torque. Sourced from the same reseller table, with the same caveat.
+
+  xl430_w250:
+    name: XL430-W250-T
+    vendor: ROBOTIS
+    kind: smart_servo
+    stall_torque_Nm: { 9.0: 1.0, 11.1: 1.4, 12.0: 1.5 }
+    no_load_speed_rpm: { 9.0: 47.0, 11.1: 57.0, 12.0: 61.0 }
+    recommended_voltage: 11.1
+    voltage_range: [6.5, 12.0]
+    gear_ratio: 258.5
+    mass_g: 57.2
+    dims_mm: [28.5, 46.5, 34.0]
+    mounting: DYNAMIXEL X-series horn and frame set
+    interface: TTL
+    source_url: https://emanual.robotis.com/docs/en/dxl/x/xl430-w250/
+    source_date: 2026-09-09
+    source: "Manufacturer e-manual specification table; stall torque and no-load speed at 9.0 / 11.1 / 12.0 V."
+    confidence: high
+    note: >-
+      Reads back its own position, load and temperature, which is what makes a real torque
+      budget checkable against the running robot rather than only against this file.
+
+  xc330_m288:
+    name: XC330-M288-T
+    vendor: ROBOTIS
+    kind: smart_servo
+    stall_torque_Nm: { 3.7: 0.69, 5.0: 0.93, 6.0: 1.10 }
+    no_load_speed_rpm: { 3.7: 59.0, 5.0: 81.0, 6.0: 97.0 }
+    recommended_voltage: 5.0
+    voltage_range: [3.7, 6.0]
+    gear_ratio: 288.35
+    mass_g: 23.0
+    dims_mm: [20.0, 34.0, 26.0]
+    mounting: DYNAMIXEL X330 horn and frame set
+    interface: TTL
+    source_url: https://emanual.robotis.com/docs/en/dxl/x/xc330-m288/
+    source_date: 2026-09-09
+    source: "Manufacturer e-manual specification table; stall torque and no-load speed at 3.7 / 5.0 / 6.0 V."
+    confidence: high
+    note: >-
+      1.10 N*m out of 23 g: roughly the same torque as an MG996R at less than half the mass,
+      which matters most at the wrist, where every gram is carried by every joint below it.
+
+  2xl430_w250:
+    name: 2XL430-W250-T
+    vendor: ROBOTIS
+    kind: smart_servo
+    axes: 2
+    stall_torque_Nm: { 9.0: 1.0, 11.1: 1.4, 12.0: 1.5 }
+    no_load_speed_rpm: { 9.0: 47.0, 11.1: 57.0, 12.0: 61.0 }
+    recommended_voltage: 11.1
+    voltage_range: [6.5, 12.0]
+    gear_ratio: 257.4
+    mass_g: 98.2
+    dims_mm: [36.0, 46.5, 36.0]
+    mounting: DYNAMIXEL X-series horn and frame set, two orthogonal output axes
+    interface: TTL
+    source_url: https://emanual.robotis.com/docs/en/dxl/x/2xl430-w250/
+    source_date: 2026-09-09
+    source: "Manufacturer e-manual specification table; per-axis stall torque at 9.0 / 11.1 / 12.0 V."
+    confidence: high
+    note: >-
+      Two axes in one case. The torque above is per axis, but mass_g is the whole unit --
+      assign it to both joints it drives and mechlint counts 98.2 g twice, so declare the
+      component once, on the link that actually carries it.
+
+  nema17_pg5:
+    name: 17HS19-1684S-PG5 (NEMA 17 + 5.18:1 planetary)
+    vendor: StepperOnline
+    kind: stepper
+    holding_torque_Nm: 2.0
+    rated_current_A: 1.68
+    gear_ratio: 5.18
+    mass_g: 520.0
+    dims_mm: [42.0, 42.0, 75.3]
+    mounting: NEMA 17 face, 8 mm output shaft
+    interface: step/dir via an external driver
+    source_url: https://www.omc-stepperonline.com/nema-17-stepper-motor-bipolar-l-48mm-w-gear-ratio-5-1-planetary-gearbox-17hs19-1684s-pg5
+    source_date: 2026-09-09
+    source: >-
+      44 N*cm motor holding torque, 5.18:1 gearbox at 90% efficiency; the 2.0 N*m figure is
+      the gearbox's max permissible torque, which is the binding limit, not 44 N*cm * 5.18.
+    confidence: medium
+    note: >-
+      Ten times the mass of an MG996R for twice the torque, and it holds position only while
+      energised. Worth it at joint 1 or 2 of a bigger arm, rarely anywhere further out.

@@ -22,6 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from mechlint import __version__
 from mechlint.core import chain
+from mechlint.core.actuators import ActuatorDatabase
+from mechlint.core.actuators import bundled as bundled_actuators
 from mechlint.core.checks import Finding, Severity, finding
 from mechlint.core.config import MaterialSpec, MechlintConfig
 from mechlint.core.geometry import MassProperties, Mat3, Vec3, mass_properties
@@ -40,6 +42,11 @@ class ComponentMass(BaseModel):
     A component that cannot be resolved is reported, never dropped: a servo
     silently missing from a link is the difference between a torque number that
     is right and one that is comfortably wrong.
+
+    Resolved ones are treated as **point masses**. Mass and centre of mass are
+    then exact; the link's tensor is under-stated by each component's own
+    moment about its centre, which for a 40 mm servo on a 200 mm arm is a low
+    single-digit percentage. Torque does not use the tensor at all.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -47,6 +54,9 @@ class ComponentMass(BaseModel):
     label: str
     mass_kg: float | None = None
     at_m: Vec3 | None = None
+    source: str | None = Field(
+        default=None, description="Where the mass came from: mechlint.yaml, or the actuator db."
+    )
     ok: bool = True
     error: str | None = None
     hint: str | None = None
@@ -139,6 +149,7 @@ def compute_inertia(
     config: MechlintConfig | None = None,
     *,
     materials: MaterialDatabase | None = None,
+    actuators: ActuatorDatabase | None = None,
     geometry: str = "visual-or-collision",
 ) -> InertiaReport:
     """Mass, centre of mass and inertia tensor for every link, in the link frame."""
@@ -147,8 +158,9 @@ def compute_inertia(
     # a link reachable from the root through only fixed joints is bolted to the world,
     # not carried, whatever it is called.
     carried = chain.moving_links(model.urdf)
+    database = actuators or bundled_actuators()
     links = [
-        _link_inertia(model, name, config, materials, geometry, findings, name in carried)
+        _link_inertia(model, name, config, materials, database, geometry, findings, name in carried)
         for name in model.link_names
     ]
     return InertiaReport(
@@ -157,7 +169,6 @@ def compute_inertia(
         model_scale=model.model_scale,
         links=links,
         findings=findings,
-        skipped={"actuator masses": "the actuator database arrives in M2"},
     )
 
 
@@ -166,6 +177,7 @@ def _link_inertia(
     name: str,
     config: MechlintConfig | None,
     materials: MaterialDatabase | None,
+    actuators: ActuatorDatabase,
     geometry: str,
     findings: list[Finding],
     carried: bool,
@@ -176,7 +188,7 @@ def _link_inertia(
     density = density_of(material, database=materials)
 
     shell = _shell(model, name, density * infill, geometry, findings)
-    components = _components(model, name, config)
+    components = _components(model, name, config, actuators)
     declared = model.declared_inertial(name)
     urdf_mass = None if declared is None or declared.mass is None else float(declared.mass)
 
@@ -286,7 +298,17 @@ def _shell(
     )
 
 
-def _components(model: RobotModel, name: str, config: MechlintConfig | None) -> list[ComponentMass]:
+def _components(
+    model: RobotModel,
+    name: str,
+    config: MechlintConfig | None,
+    actuators: ActuatorDatabase,
+) -> list[ComponentMass]:
+    """Resolve one link's ``components:`` entries to masses at places.
+
+    An explicit ``mass_g`` wins over the database: it is what somebody weighed,
+    and a clone servo rarely matches the figure its datasheet claims.
+    """
     if config is None:
         return []
     resolved: list[ComponentMass] = []
@@ -294,15 +316,35 @@ def _components(model: RobotModel, name: str, config: MechlintConfig | None) -> 
         label = entry.actuator or entry.note or "component"
         position = _component_position(model, name, entry)
         if entry.mass_g is not None:
-            resolved.append(ComponentMass(label=label, mass_kg=entry.mass_g * 1e-3, at_m=position))
+            resolved.append(
+                ComponentMass(
+                    label=label,
+                    mass_kg=entry.mass_g * 1e-3,
+                    at_m=position,
+                    source="mechlint.yaml",
+                )
+            )
+            continue
+        try:
+            actuator = actuators[entry.actuator or ""]
+        except KeyError as error:
+            resolved.append(
+                ComponentMass(
+                    label=label,
+                    at_m=position,
+                    ok=False,
+                    error=str(error),
+                    hint="add it to your own actuator YAML, or give this component a mass_g",
+                )
+            )
             continue
         resolved.append(
             ComponentMass(
                 label=label,
+                mass_kg=actuator.mass_kg,
                 at_m=position,
-                ok=False,
-                error=f"no mass known for actuator {entry.actuator!r}",
-                hint="the actuator database arrives in M2; until then give it a mass_g",
+                source=f"actuator db: {actuator.name}, {actuator.mass_g:g} g "
+                f"({actuator.confidence} confidence)",
             )
         )
     return resolved
