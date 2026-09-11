@@ -3,8 +3,8 @@
 *This file exists so a failure like `U005` can be one short line in the terminal instead of a
 paragraph: the message names the ID, and this table says what it means and how to fix it.*
 
-IDs are the contract with CI, with `mechlint.yaml`'s severity overrides (M3), and with the
-`urdfdom` proposal (M5), so they are never reused or renumbered. Only `U0xx` is proposable
+IDs are the contract with CI and with the `urdfdom` proposal (M5), so they are never reused
+or renumbered. Only `U0xx` is proposable
 upstream: those are judgements about the URDF alone, while a `D0xx` needs something outside it
 to disagree with.
 
@@ -32,5 +32,5 @@ the file once. `mechlint check` runs both.
 Prefixes: `U` URDF sanity · `M` mesh · `T` torque · `D` drift.
 
 Severities: **fail** sets a non-zero exit code from `mechlint check`; **warn** reports only;
-**info** is context, such as which masses were measured and which estimated. Per-project
-overrides are M3.
+**info** is context, such as which masses were measured and which estimated. They are fixed:
+a project cannot yet downgrade a check it disagrees with, and no milestone schedules that.

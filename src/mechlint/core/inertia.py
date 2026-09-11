@@ -12,6 +12,7 @@ own length unit at the last moment, so a decimetre model stays self-consistent.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -25,12 +26,12 @@ from mechlint.core import chain
 from mechlint.core.actuators import ActuatorDatabase
 from mechlint.core.actuators import bundled as bundled_actuators
 from mechlint.core.checks import Finding, Severity, finding
-from mechlint.core.config import MaterialSpec, MechlintConfig
+from mechlint.core.config import MaterialSpec, MechlintConfig, applied_overrides
 from mechlint.core.geometry import MassProperties, Mat3, Vec3, mass_properties
 from mechlint.core.materials import MaterialDatabase, density_of
 from mechlint.core.urdf import RobotModel
 
-MassSource = Literal["measured", "estimated", "urdf", "components", "none"]
+MassSource = Literal["measured", "estimated", "urdf", "components", "none", "override"]
 
 #: A body whose mass, centre and tensor are all known: (kg, metres, kg*m^2).
 _Body = tuple[float, np.ndarray, np.ndarray]
@@ -109,6 +110,11 @@ class InertiaReport(BaseModel):
     links: list[LinkInertia] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
     skipped: dict[str, str] = Field(default_factory=dict)
+    overrides: dict[str, object] = Field(
+        default_factory=dict,
+        description="What this call changed about mechlint.yaml, echoed back. Empty means "
+        "the report describes the project as committed.",
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -150,17 +156,36 @@ def compute_inertia(
     *,
     materials: MaterialDatabase | None = None,
     actuators: ActuatorDatabase | None = None,
+    link_masses_g: Mapping[str, float] | None = None,
     geometry: str = "visual-or-collision",
 ) -> InertiaReport:
-    """Mass, centre of mass and inertia tensor for every link, in the link frame."""
+    """Mass, centre of mass and inertia tensor for every link, in the link frame.
+
+    ``link_masses_g`` is the what-if door: "suppose arm_2 came out at 80 g". It
+    replaces the *whole* link mass -- shell and components together -- keeping the
+    shape, so the centre of mass stays put and the tensor scales with the mass. A
+    link overridden this way is deliberately not writable: a hypothetical must
+    never reach the generated xacro.
+    """
     findings: list[Finding] = []
+    overrides = _link_mass_overrides(model, link_masses_g)
     # Which links a joint actually holds up. Derived from the chain, never declared:
     # a link reachable from the root through only fixed joints is bolted to the world,
     # not carried, whatever it is called.
     carried = chain.moving_links(model.urdf)
     database = actuators or bundled_actuators()
     links = [
-        _link_inertia(model, name, config, materials, database, geometry, findings, name in carried)
+        _link_inertia(
+            model,
+            name,
+            config,
+            materials,
+            database,
+            geometry,
+            findings,
+            name in carried,
+            overrides.get(name),
+        )
         for name in model.link_names
     ]
     return InertiaReport(
@@ -169,7 +194,27 @@ def compute_inertia(
         model_scale=model.model_scale,
         links=links,
         findings=findings,
+        overrides=applied_overrides(link_mass_g=overrides),
     )
+
+
+def _link_mass_overrides(
+    model: RobotModel, link_masses_g: Mapping[str, float] | None
+) -> dict[str, float]:
+    """Validate the what-if masses. A typo here is refused, not quietly ignored.
+
+    Silently dropping an override for a misspelt link would answer a question
+    nobody asked -- and answer it with the unmodified robot, which looks right.
+    """
+    overrides: dict[str, float] = {}
+    for name, grams in (link_masses_g or {}).items():
+        if name not in model.link_names:
+            known = ", ".join(model.link_names)
+            raise ValueError(f"no link called {name!r} in {model.name}; it has: {known}")
+        if grams < 0.0:
+            raise ValueError(f"link mass for {name!r} cannot be negative, got {grams:g} g")
+        overrides[name] = float(grams)
+    return overrides
 
 
 def _link_inertia(
@@ -181,6 +226,7 @@ def _link_inertia(
     geometry: str,
     findings: list[Finding],
     carried: bool,
+    override_mass_g: float | None = None,
 ) -> LinkInertia:
     spec = _material_spec(config, name)
     material = spec.material or "pla"
@@ -220,6 +266,21 @@ def _link_inertia(
     else:
         mass, com, tensor = 0.0, np.zeros(3), np.zeros((3, 3))
         source = "none"
+
+    if override_mass_g is not None:
+        wanted = override_mass_g * 1e-3
+        # Same shape, different mass: the centre stays where the geometry put it and
+        # the tensor scales with the mass. With nothing to scale, the tensor is left
+        # at zero rather than invented, and the note says so.
+        tensor = tensor * (wanted / mass) if mass > 0.0 else np.zeros((3, 3))
+        notes.append(
+            f"mass overridden for this call: {wanted * 1e3:g} g instead of "
+            f"{mass * 1e3:.1f} g ({source}); not written to the xacro"
+            if mass > 0.0
+            else f"mass overridden for this call: {wanted * 1e3:g} g, with no geometry to "
+            "scale, so the inertia tensor stays zero"
+        )
+        mass, source = wanted, "override"
 
     return LinkInertia(
         link=name,
@@ -393,6 +454,103 @@ def _mat3(values: np.ndarray) -> Mat3:
 
 
 # --------------------------------------------------------------------------- emit
+
+#: Every generated file starts with this. It is what tells mechlint that a file it is
+#: about to overwrite is its own output and not something a human wrote.
+GENERATED_MARKER = "Generated by mechlint"
+
+#: What a directory target is filled in with.
+DEFAULT_FILENAME = "inertials.xacro"
+
+#: Why a link got no macro. Keyed by ``mass_source``, so the reason is the same
+#: sentence wherever it is shown.
+_NOT_WRITABLE = {
+    "urdf": "mass comes from the URDF itself; mechlint computed nothing to write back",
+    "none": "no geometry and no components: nothing to compute from",
+    "override": "mass was overridden for this call; a hypothetical is not written",
+}
+
+
+class WriteRefused(Exception):
+    """A write mechlint will not do, with the thing to do instead."""
+
+    def __init__(self, message: str, hint: str = "") -> None:
+        super().__init__(message)
+        self.message = message
+        self.hint = hint
+
+
+class WriteResult(BaseModel):
+    """What ``write_inertials`` did, in enough detail to be reviewed."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: Path
+    created: bool = Field(description="False when an existing generated file was replaced.")
+    unchanged: bool = Field(
+        default=False,
+        description="The file already said exactly this. Re-running is a no-op, so a host "
+        "may repeat the call without touching the working tree.",
+    )
+    links: list[str] = Field(default_factory=list, description="Links that got a macro.")
+    skipped: dict[str, str] = Field(
+        default_factory=dict, description="Links that did not, and why. Not an error."
+    )
+    bytes_written: int = 0
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def include(self) -> str:
+        """The line to paste into the description, which is the next thing to do."""
+        return f'<xacro:include filename="{self.path.name}"/>'
+
+
+def target_path(path: Path) -> Path:
+    """Where the xacro goes: a directory means ``inertials.xacro`` inside it."""
+    path = Path(path)
+    return path / DEFAULT_FILENAME if path.is_dir() else path
+
+
+def write_inertials(report: InertiaReport, path: Path, *, force: bool = False) -> WriteResult:
+    """Write the generated xacro, and refuse in the two cases where writing is wrong.
+
+    mechlint overwrites exactly one kind of file: one it generated itself, marked
+    as such in its header. Anything else is the user's, and needs ``force``. A
+    report carrying per-call overrides is refused outright -- a what-if answer that
+    ends up in the robot description is worse than no answer.
+    """
+    if report.overrides:
+        names = ", ".join(sorted(report.overrides))
+        raise WriteRefused(
+            f"this report was computed with overrides ({names}), so it describes a "
+            "hypothetical robot, not the one in the description",
+            hint="re-run without the override, then write.",
+        )
+
+    target = target_path(path)
+    existing = target.read_text() if target.is_file() else None
+    if existing is not None and not force and GENERATED_MARKER not in existing:
+        raise WriteRefused(
+            f"{target} was not generated by mechlint",
+            hint="mechlint only overwrites its own output. Pass force, or write elsewhere.",
+        )
+
+    content = inertials_xacro(report)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    written = [link.link for link in report.writable_links]
+    return WriteResult(
+        path=target,
+        created=existing is None,
+        unchanged=existing == content,
+        links=written,
+        skipped={
+            link.link: _NOT_WRITABLE.get(link.mass_source, "nothing computed")
+            for link in report.links
+            if not link.writable
+        },
+        bytes_written=len(content.encode()),
+    )
 
 
 def inertials_xacro(report: InertiaReport) -> str:

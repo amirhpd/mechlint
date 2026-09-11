@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from mechlint.core import chain
 from mechlint.core.actuators import Actuator, ActuatorDatabase, bundled
 from mechlint.core.checks import Finding, Severity, finding
-from mechlint.core.config import MechlintConfig
+from mechlint.core.config import MechlintConfig, applied_overrides
 from mechlint.core.geometry import Vec3
 from mechlint.core.inertia import InertiaReport, compute_inertia
 from mechlint.core.materials import Confidence
@@ -129,6 +129,11 @@ class TorqueReport(BaseModel):
     payloads_g: list[float] = Field(default_factory=list)
     payload_at: str | None = Field(default=None, description="The link a payload hangs from.")
     samples: int = 0
+    overrides: dict[str, object] = Field(
+        default_factory=dict,
+        description="What this call changed about mechlint.yaml, echoed back, so a what-if "
+        "answer carries its own assumptions. Empty means the project as committed.",
+    )
 
     joints: list[JointTorque] = Field(default_factory=list)
     unjudged: list[str] = Field(
@@ -168,6 +173,7 @@ def torque_budget(
     assignments: Mapping[str, str | None] | None = None,
     mount: object | None = None,
     payload_at: str | None = None,
+    link_masses_g: Mapping[str, float] | None = None,
     samples: int = DEFAULT_SAMPLES,
 ) -> TorqueReport:
     """Worst-case static torque per joint, and the margin against its actuator.
@@ -176,6 +182,11 @@ def torque_budget(
     "what if the payload were 200 g?" without editing the file -- and the report
     echoes the values it used, so the answer carries its own assumptions.
     """
+    if inertia is not None and link_masses_g:
+        raise ValueError(
+            "link_masses_g cannot be applied to an inertia report that was already computed; "
+            "pass one or the other"
+        )
     database = actuators or bundled()
     scenario = config.scenario if config is not None else None
     urdf = model.urdf
@@ -193,7 +204,11 @@ def torque_budget(
         mount if mount is not None else _mount(scenario),
         override=mount is not None,
     )
-    report = inertia if inertia is not None else compute_inertia(model, config, actuators=database)
+    report = (
+        inertia
+        if inertia is not None
+        else compute_inertia(model, config, actuators=database, link_masses_g=link_masses_g)
+    )
     bodies = {link.link: (link.mass_kg, np.asarray(link.com_m)) for link in report.links}
 
     joints = chain.dof_joints(urdf)
@@ -202,7 +217,7 @@ def torque_budget(
     )
     count = len(next(iter(poses.values())))
 
-    hand = payload_at or chain.tip(urdf)
+    hand = _payload_link(model, payload_at) or chain.tip(urdf)
     tip_centre = _origin(poses, hand, model.model_scale) if hand else None
 
     findings: list[Finding] = []
@@ -236,6 +251,15 @@ def torque_budget(
         payloads_g=[load * 1e3 for load in loads],
         payload_at=hand,
         samples=count,
+        overrides=applied_overrides(
+            payload_g=payloads_g,
+            voltage_V=voltage,
+            joint_actuators=dict(assignments or {}),
+            mount=mount,
+            payload_at=payload_at,
+            samples=samples if samples != DEFAULT_SAMPLES else None,
+            **report.overrides,
+        ),
         joints=results,
         unjudged=[j.joint for j in results if not j.judged],
         findings=findings,
@@ -252,6 +276,20 @@ def _payloads(payloads_g: list[float] | None, scenario: object) -> list[float]:
     asked = payloads_g if payloads_g is not None else [getattr(scenario, "payload_g", 0.0) or 0.0]
     values = sorted({0.0} | {round(float(grams), 6) for grams in asked})
     return [value * 1e-3 for value in values]
+
+
+def _payload_link(model: RobotModel, payload_at: str | None) -> str | None:
+    """The link a payload hangs from, checked before it becomes a KeyError deep in the FK.
+
+    Left unset, the chain decides: the deepest moving leaf is where a gripper is. Set
+    to a link that does not exist, the answer would silently be about a different arm.
+    """
+    if payload_at is None:
+        return None
+    if payload_at not in model.link_names:
+        known = ", ".join(model.link_names)
+        raise ValueError(f"no link called {payload_at!r} to hang a payload from; it has: {known}")
+    return payload_at
 
 
 def _mount(scenario: object) -> object:

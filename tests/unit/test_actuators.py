@@ -13,7 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from mechlint.core.actuators import KGFCM_TO_NM, ActuatorDatabase, bundled, load_database
+from mechlint.core.actuators import (
+    KGFCM_TO_NM,
+    ActuatorDatabase,
+    TableNotFound,
+    bundled,
+    load_database,
+)
 
 ENTRY = """
 actuators:
@@ -173,3 +179,13 @@ def test_a_project_table_wins_over_the_bundled_one(tmp_path: Path) -> None:
 
     assert merged["mg996r"].vendor == "nobody"
     assert "xl430_w250" in merged  # the rest of the bundled table survives
+
+
+def test_a_missing_table_says_where_paths_are_resolved_from(tmp_path: Path) -> None:
+    """A bare "[Errno 2] No such file" is a stack trace by another name: three places
+    can name this file, and each resolves relative paths differently."""
+    with pytest.raises(TableNotFound) as raised:
+        ActuatorDatabase.from_yaml(tmp_path / "nope.yaml")
+
+    assert "actuator table not found" in raised.value.message
+    assert "relative" in raised.value.hint

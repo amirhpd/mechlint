@@ -11,8 +11,17 @@ from mechlint import __version__
 from mechlint.cli.main import app
 from tests.unit.urdf_builder import box, inertial, write_urdf
 
-SUBCOMMANDS = ["inertia", "urdf-check", "torque", "actuators", "drift", "render", "check"]
-BUILT = ["inertia", "urdf-check", "torque", "check"]
+SUBCOMMANDS = [
+    "inspect",
+    "inertia",
+    "urdf-check",
+    "torque",
+    "actuators",
+    "drift",
+    "render",
+    "check",
+]
+BUILT = ["inspect", "inertia", "urdf-check", "torque", "check"]
 UNBUILT = ["drift", "render"]
 
 #: A model with a sane tensor for its 0.1 x 0.1 x 0.4 box, so nothing is flagged.
@@ -334,3 +343,208 @@ def test_a_malformed_actuator_table_is_a_usage_error_not_a_traceback(tmp_path: P
 
     assert result.exit_code == 2
     assert "top-level 'actuators' mapping" in result.output
+
+
+# --------------------------------------------------------------------------- what-ifs
+
+#: The geometry is offset from the link frame on purpose: a box centred on its own
+#: origin sits exactly on the pivot, so every gravity torque about it is zero.
+ARM = (
+    '<link name="base"/>'
+    '<link name="tool"><visual><origin xyz="0 0 0.2"/>'
+    '<geometry><box size="0.1 0.1 0.4"/></geometry></visual></link>'
+    '<joint name="j1" type="revolute">'
+    '<parent link="base"/><child link="tool"/>'
+    '<origin xyz="0 0 0.5"/><axis xyz="0 1 0"/>'
+    '<limit lower="-1" upper="1" effort="5" velocity="1"/></joint>'
+)
+
+
+@pytest.fixture
+def arm_urdf(tmp_path: Path) -> Path:
+    return write_urdf(tmp_path, ARM)
+
+
+def test_link_mass_changes_the_torque_and_is_echoed(arm_urdf: Path) -> None:
+    import json
+
+    heavy = runner.invoke(app, ["torque", str(arm_urdf), "-f", "json"])
+    light = runner.invoke(app, ["torque", str(arm_urdf), "--link-mass", "tool=100", "-f", "json"])
+    payload = json.loads(light.output)
+
+    assert payload["overrides"] == {"link_mass_g": {"tool": 100.0}}
+    assert (
+        payload["joints"][0]["cases"][0]["max_torque_Nm"]
+        < (json.loads(heavy.output)["joints"][0]["cases"][0]["max_torque_Nm"])
+    )
+
+
+def test_the_table_says_out_loud_that_a_run_was_a_what_if(arm_urdf: Path) -> None:
+    """A number nobody can tell apart from the committed project's is worse than none."""
+    result = runner.invoke(app, ["torque", str(arm_urdf), "--link-mass", "tool=100"])
+
+    assert "what-if" in result.output
+    assert "not the committed project" in result.output
+
+
+def test_a_what_if_is_never_written_to_the_xacro(arm_urdf: Path, tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["inertia", str(arm_urdf), "--link-mass", "tool=100", "-w", str(tmp_path)]
+    )
+
+    assert result.exit_code == 2
+    assert "hypothetical" in result.output
+    assert not (tmp_path / "inertials.xacro").exists()
+
+
+def test_a_link_mass_that_is_not_a_number_is_a_usage_error(arm_urdf: Path) -> None:
+    result = runner.invoke(app, ["inertia", str(arm_urdf), "--link-mass", "tool=heavy"])
+
+    assert result.exit_code == 2
+    assert "must be a number" in result.output
+
+
+def test_a_link_mass_for_an_unknown_link_is_a_usage_error(arm_urdf: Path) -> None:
+    result = runner.invoke(app, ["inertia", str(arm_urdf), "--link-mass", "tooll=100"])
+
+    assert result.exit_code == 2
+    assert "no link called 'tooll'" in result.output
+
+
+@pytest.mark.parametrize("name", ["inertia", "torque", "check"])
+def test_every_command_that_uses_masses_takes_the_override(name: str, arm_urdf: Path) -> None:
+    result = runner.invoke(app, [name, str(arm_urdf), "--link-mass", "tool=100"])
+
+    assert result.exit_code in (0, 1), result.output  # 1 is a failed check, not a usage error
+    assert "what-if" in result.output
+
+
+# --------------------------------------------------------------------------- the chain
+
+
+def test_inspect_shows_links_joints_and_reach(sane_urdf: Path) -> None:
+    """The terminal twin of inspect_robot: llms.md says read the chain first, and that
+    advice is worth nothing at a prompt if only the chat layer can follow it."""
+    result = runner.invoke(app, ["inspect", str(sane_urdf)])
+
+    assert result.exit_code == 0
+    assert "base" in result.output
+    assert "computes no physics" in result.output
+
+
+def test_inspect_json_carries_the_same_fields_the_mcp_tool_returns(arm_urdf: Path) -> None:
+    import json
+
+    payload = json.loads(runner.invoke(app, ["inspect", str(arm_urdf), "-f", "json"]).output)
+
+    assert payload["actuated_joints"] == ["j1"]
+    assert payload["reach_m"] > 0
+    assert {link["name"] for link in payload["links"]} == {"base", "tool"}
+
+
+def test_inspect_writes_nothing(arm_urdf: Path, tmp_path: Path) -> None:
+    before = sorted(p.name for p in tmp_path.iterdir())
+    runner.invoke(app, ["inspect", str(arm_urdf)])
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_a_fixed_joint_shows_no_axis_or_travel(tmp_path: Path) -> None:
+    """yourdfpy defaults a fixed joint's axis to [1, 0, 0]; printing it invites a reader
+    to believe the joint turns about x."""
+    body = '<link name="a"/><link name="b"/><joint name="weld" type="fixed">'
+    body += '<parent link="a"/><child link="b"/></joint>'
+    result = runner.invoke(app, ["inspect", str(write_urdf(tmp_path, body))])
+
+    assert "weld" in result.output
+    assert "1, 0, 0" not in result.output
+
+
+# ------------------------------------------------------- the project's own actuator table
+
+PROJECT_SERVO = (
+    "robot: {{ description: {urdf} }}\n"
+    "actuator_db: {db}\n"
+    "components: {{ base: [{{ actuator: hs645, drives: j1 }}] }}\n"
+    "actuators: {{ voltage: 6.0, joints: {{ j1: hs645 }} }}\n"
+)
+
+
+@pytest.fixture
+def project_with_its_own_servo(tmp_path: Path, arm_urdf: Path, extra_db: Path) -> Path:
+    config = tmp_path / "mechlint.yaml"
+    config.write_text(PROJECT_SERVO.format(urdf=arm_urdf.name, db=extra_db.name))
+    return config
+
+
+def test_urdf_check_reads_the_projects_actuator_table(project_with_its_own_servo: Path) -> None:
+    """U007 judges <limit effort> against a real servo. Judging it against the bundled
+    table alone told a project its own servo did not exist -- a fail that was not real."""
+    result = runner.invoke(app, ["urdf-check", "-c", str(project_with_its_own_servo)])
+
+    assert "unknown actuator" not in result.output
+
+
+def test_inertia_reads_the_projects_actuator_table(project_with_its_own_servo: Path) -> None:
+    """A servo the database cannot resolve is silently absent mass: the arm reads lighter
+    than it is, and every torque number after it is wrong in the reassuring direction."""
+    import json
+
+    result = runner.invoke(app, ["inertia", "-c", str(project_with_its_own_servo), "-f", "json"])
+    components = [c for link in json.loads(result.output)["links"] for c in link["components"]]
+
+    assert [c["ok"] for c in components] == [True]
+    assert components[0]["mass_kg"] == pytest.approx(0.0552)
+
+
+@pytest.mark.parametrize("name", ["inspect", "inertia", "urdf-check", "torque", "check"])
+def test_every_command_agrees_about_the_same_project(
+    name: str, project_with_its_own_servo: Path
+) -> None:
+    """One config, five doors, no door saying the project's own servo is unknown."""
+    result = runner.invoke(app, [name, "-c", str(project_with_its_own_servo)])
+
+    assert result.exit_code in (0, 1), result.output
+    assert "unknown actuator" not in result.output
+
+
+# --------------------------------------------------------------------------- more what-ifs
+
+
+def test_check_can_try_a_different_servo_too(arm_urdf: Path) -> None:
+    """`check` took every other override already; leaving this one out made the CI door
+    the only one that could not answer the question the chat door was asked."""
+    import json
+
+    result = runner.invoke(app, ["check", str(arm_urdf), "--actuator", "j1=ds3225", "-f", "json"])
+    payload = json.loads(result.output)
+
+    assert payload["torque"]["overrides"] == {"joint_actuators": {"j1": "ds3225"}}
+    assert payload["torque"]["joints"][0]["actuator"] == "ds3225"
+
+
+def test_the_payload_can_be_hung_from_a_named_link(arm_urdf: Path) -> None:
+    import json
+
+    result = runner.invoke(
+        app, ["torque", str(arm_urdf), "-P", "200", "--payload-at", "base", "-f", "json"]
+    )
+    payload = json.loads(result.output)
+
+    assert payload["payload_at"] == "base"
+    assert payload["overrides"]["payload_at"] == "base"
+
+
+def test_a_payload_on_a_link_that_does_not_exist_is_a_usage_error(arm_urdf: Path) -> None:
+    result = runner.invoke(app, ["torque", str(arm_urdf), "--payload-at", "nose"])
+
+    assert result.exit_code == 2
+    assert "no link called 'nose'" in result.output
+
+
+def test_a_missing_actuator_table_says_what_to_check(sane_urdf: Path) -> None:
+    result = runner.invoke(app, ["actuators", "--actuator-db", "does/not/exist.yaml"])
+
+    assert result.exit_code == 2
+    assert "actuator table not found" in result.output
+    assert "relative" in result.output

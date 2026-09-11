@@ -16,6 +16,7 @@ from mechlint.core.actuators import Actuator
 from mechlint.core.checks import CHECKS, CheckReport, Severity
 from mechlint.core.inertia import InertiaReport
 from mechlint.core.torque import TorqueCase, TorqueReport
+from mechlint.core.urdf import JointSummary, RobotSummary
 
 SEVERITY_ORDER = {Severity.FAIL: 0, Severity.WARN: 1, Severity.INFO: 2}
 
@@ -25,6 +26,160 @@ def to_json(report: BaseModel | list[BaseModel]) -> str:
     if isinstance(report, list):
         return json.dumps([item.model_dump(mode="json") for item in report], indent=2)
     return report.model_dump_json(indent=2)
+
+
+# --------------------------------------------------------------------------- overrides
+
+
+def _override_notes(overrides: dict[str, object]) -> list[str]:
+    """The per-call what-ifs as short phrases, in the order the report stores them."""
+    phrases: list[str] = []
+    for name, value in overrides.items():
+        if name == "payload_g" and isinstance(value, list):
+            phrases.append("payload " + ", ".join(f"{float(g):g} g" for g in value))
+        elif name == "voltage_V":
+            phrases.append(f"{float(value):g} V")  # type: ignore[arg-type]
+        elif name == "link_mass_g" and isinstance(value, dict):
+            phrases += [f"{link} {float(grams):g} g" for link, grams in value.items()]
+        elif name == "joint_actuators" and isinstance(value, dict):
+            phrases += [f"{joint} = {key or 'none'}" for joint, key in value.items()]
+        elif name == "samples":
+            phrases.append(f"{value} poses")
+        elif name == "payload_at":
+            phrases.append(f"payload at {value}")
+        else:
+            phrases.append(f"{name.replace('_', ' ')} {value}")
+    return phrases
+
+
+def _overrides_banner(overrides: dict[str, object]) -> list[str]:
+    """Loud, because the numbers under it are not the committed project's."""
+    if not overrides:
+        return []
+    return [f"  what-if: {' · '.join(_override_notes(overrides))} — not the committed project", ""]
+
+
+def _overrides_line(overrides: dict[str, object]) -> list[str]:
+    if not overrides:
+        return []
+    return [
+        f"> **What-if run.** {' · '.join(_override_notes(overrides))}. "
+        "These numbers describe a hypothetical, not the committed project.",
+        "",
+    ]
+
+
+# --------------------------------------------------------------------------- the chain
+
+
+def render_summary(summary: RobotSummary) -> str:
+    """The chain before any physics: what carries geometry, what moves, how far it reaches."""
+    moving = sum(1 for link in summary.links if link.moves)
+    lines = [
+        f"{summary.robot} — {summary.source}",
+        "  ·  ".join(
+            (
+                f"model scale: {summary.model_scale:g} m per URDF unit",
+                f"reach {summary.reach_m:.3f} m to {summary.reach_link}",
+                f"{len(summary.actuated_joints)} actuated joint"
+                + ("" if len(summary.actuated_joints) == 1 else "s"),
+                f"{moving} of {len(summary.links)} links move",
+            )
+        ),
+    ]
+
+    links = [
+        (
+            link.name,
+            "yes" if link.moves else "no",
+            ", ".join(dict.fromkeys(link.geometry)) or "—",
+            "—" if link.watertight is None else ("yes" if link.watertight else "no"),
+            "—" if link.declared_mass_kg is None else f"{link.declared_mass_kg * 1e3:.1f} g",
+        )
+        for link in summary.links
+    ]
+    lines += ["", *_columns(("link", "moves", "geometry", "watertight", "mass in URDF"), links)]
+
+    joints = [
+        (joint.name, joint.type, f"{joint.parent} → {joint.child}", *_axis_limits(joint))
+        for joint in summary.joints
+    ]
+    lines += [
+        "",
+        *_columns(("joint", "type", "parent → child", "axis", "limits", "effort"), joints),
+    ]
+
+    # No verdict here on purpose: inspect computes nothing, so it can pass judgement on
+    # nothing. What the numbers mean is `urdf-check`'s answer, and it has the check IDs.
+    lines += [
+        "",
+        "  this command computes no physics: run `mechlint urdf-check` for the verdict "
+        "and `mechlint inertia` for real masses",
+    ]
+    return "\n".join(lines)
+
+
+def _axis_limits(joint: JointSummary) -> tuple[str, str, str]:
+    """A fixed joint has no axis, no travel and no effort, whatever the URDF defaulted to."""
+    if joint.type == "fixed":
+        return "—", "—", "—"
+    axis = "—" if joint.axis is None else _vector(joint.axis)
+    span = (
+        "—"
+        if joint.lower is None or joint.upper is None
+        else f"{joint.lower:+.2f} .. {joint.upper:+.2f}"
+    )
+    return axis, span, "—" if joint.effort is None else f"{joint.effort:g} N*m"
+
+
+def _columns(headings: tuple[str, ...], rows: list[tuple[str, ...]]) -> list[str]:
+    """A table whose columns fit their contents. Joint names are long and vary by project."""
+    widths = [
+        max(len(heading), *(len(row[index]) for row in rows)) if rows else len(heading)
+        for index, heading in enumerate(headings)
+    ]
+
+    # The last column is right-aligned: it is the numeric one in both tables here.
+    def line(cells: tuple[str, ...]) -> str:
+        body = "  ".join(
+            cell.ljust(width) for cell, width in zip(cells[:-1], widths[:-1], strict=True)
+        )
+        return f"  {body}  {cells[-1]:>{widths[-1]}}"
+
+    return [line(headings), *(line(row) for row in rows)]
+
+
+def summary_markdown(summary: RobotSummary) -> str:
+    lines = [
+        f"# mechlint inspect — {summary.robot}",
+        "",
+        f"`{summary.source}` · model scale {summary.model_scale:g} m per URDF unit · reach "
+        f"{summary.reach_m:.3f} m to `{summary.reach_link}` · "
+        f"{len(summary.actuated_joints)} actuated joints",
+        "",
+        "| Link | Moves | Geometry | Watertight | Mass in URDF |",
+        "|---|---|---|---|---|",
+    ]
+    for link in summary.links:
+        kinds = ", ".join(dict.fromkeys(link.geometry)) or "—"
+        watertight = "—" if link.watertight is None else ("yes" if link.watertight else "no")
+        declared = "—" if link.declared_mass_kg is None else f"{link.declared_mass_kg * 1e3:.1f} g"
+        lines.append(
+            f"| `{link.name}` | {'yes' if link.moves else 'no'} | {kinds} | "
+            f"{watertight} | {declared} |"
+        )
+    lines += [
+        "",
+        "| Joint | Type | Parent → child | Axis | Limits | Effort |",
+        "|---|---|---|---|---|---|",
+    ]
+    for joint in summary.joints:
+        axis, span, effort = _axis_limits(joint)
+        lines.append(
+            f"| `{joint.name}` | {joint.type} | `{joint.parent}` → `{joint.child}` | "
+            f"{axis} | {span} | {effort.replace('N*m', 'N·m')} |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- checks
@@ -91,6 +246,7 @@ def render_inertia(report: InertiaReport) -> str:
         "",
         f"  {'link':<26}{'mass':>10}  {'source':<10}{'centre of mass (m)':<28}{'in URDF':>10}",
     ]
+    header[3:3] = _overrides_banner(report.overrides)
     rows = []
     for link in links:
         com = "(" + ", ".join(f"{v:+.4f}" for v in link.com_m) + ")"
@@ -135,6 +291,7 @@ def inertia_markdown(report: InertiaReport) -> str:
         "| Link | Mass | Source | Centre of mass (m) | URDF today |",
         "|---|---|---|---|---|",
     ]
+    lines[4:4] = _overrides_line(report.overrides)
     for link in report.links:
         if link.mass_source == "none":
             continue
@@ -175,6 +332,7 @@ def render_torque(report: TorqueReport) -> str:
             if part
         ),
         "",
+        *_overrides_banner(report.overrides),
         f"  {'joint':<9}{'actuator':<14}{'available':>10}"
         + "".join(f"{_payload_label(g):>19}" for g in payloads),
         f"  {'':<9}{'':<14}{'N*m':>10}" + "".join(f"{'N*m  margin':>19}" for _ in payloads),
@@ -272,6 +430,7 @@ def torque_markdown(report: TorqueReport) -> str:
         + f" · {report.samples} pose{'' if report.samples == 1 else 's'}"
         + f" · **{'pass' if report.ok else 'fail'}**",
         "",
+        *_overrides_line(report.overrides),
         "| Joint | Actuator | Available N·m | "
         + " | ".join(f"{_payload_label(g)} N·m (margin)" for g in payloads)
         + " |",

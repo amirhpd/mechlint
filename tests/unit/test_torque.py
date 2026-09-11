@@ -301,3 +301,49 @@ def test_a_mistyped_actuator_name_does_not_read_as_a_deliberate_null(tmp_path: P
 
     assert deliberate.notes == []
     assert "not in the database" in mistyped.notes[0]
+
+
+# --------------------------------------------------------------------------- overrides
+
+
+def test_a_link_mass_override_lands_exactly_where_the_hand_solution_says(tmp_path: Path) -> None:
+    """Halve link 1: joint 1 loses 0.5 kg at 0.5 m and joint 2 does not move at all."""
+    report = torque_budget(
+        _model(tmp_path), _config(tmp_path), payloads_g=[0.0], link_masses_g={"link_1": 500.0}
+    )
+    joints = _joints(report)
+
+    assert joints["joint_1"].cases[0].max_torque_Nm == pytest.approx(
+        (0.5 * 0.5 + 0.5 * 1.25) * G, abs=1e-9
+    )
+    assert joints["joint_2"].cases[0].max_torque_Nm == pytest.approx(0.5 * 0.25 * G, abs=1e-9)
+
+
+def test_the_report_echoes_only_what_was_overridden(tmp_path: Path) -> None:
+    report = torque_budget(_model(tmp_path), _config(tmp_path), payloads_g=[200.0], mount="ceiling")
+
+    assert report.overrides == {"payload_g": [200.0], "mount": "ceiling"}
+
+
+def test_a_run_straight_from_the_config_overrides_nothing(tmp_path: Path) -> None:
+    assert torque_budget(_model(tmp_path), _config(tmp_path)).overrides == {}
+
+
+def test_a_non_default_sample_count_is_echoed_because_it_changes_the_answer(
+    tmp_path: Path,
+) -> None:
+    """Two runs at different sample counts can disagree; the result has to say which."""
+    report = torque_budget(_model(tmp_path), _config(tmp_path), samples=64)
+
+    assert report.overrides == {"samples": 64}
+
+
+def test_a_mass_override_on_an_already_computed_inertia_report_is_refused(tmp_path: Path) -> None:
+    """Applying it would be silent: the masses were fixed before this call was made."""
+    from mechlint.core.inertia import compute_inertia
+
+    model, config = _model(tmp_path), _config(tmp_path)
+    with pytest.raises(ValueError, match="pass one or the other"):
+        torque_budget(
+            model, config, inertia=compute_inertia(model, config), link_masses_g={"link_1": 500.0}
+        )

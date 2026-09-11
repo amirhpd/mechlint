@@ -36,6 +36,15 @@ KINDS: frozenset[str] = frozenset(("hobby_servo", "smart_servo", "stepper"))
 KGFCM_TO_NM = 0.0980665
 
 
+class TableNotFound(FileNotFoundError):
+    """A named actuator YAML that is not there, with the reason it usually is not."""
+
+    def __init__(self, message: str, hint: str = "") -> None:
+        super().__init__(message)
+        self.message = message
+        self.hint = hint
+
+
 class TorqueLimit(BaseModel):
     """The torque an actuator is judged against, and on what grounds."""
 
@@ -177,7 +186,16 @@ class ActuatorDatabase(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ActuatorDatabase:
-        return cls._from_text(Path(path).read_text(), source=str(path))
+        source = Path(path)
+        if not source.is_file():
+            # A bare "[Errno 2] No such file" is a stack trace by another name: it says
+            # nothing about which of the three places named this file, or what to do.
+            raise TableNotFound(
+                f"actuator table not found: {source}",
+                "a path in mechlint.yaml's actuator_db is relative to that file; "
+                "--actuator-db and the actuator_db argument are relative to where you are.",
+            )
+        return cls._from_text(source.read_text(), source=str(source))
 
     @classmethod
     def _from_text(cls, text: str, *, source: str) -> ActuatorDatabase:

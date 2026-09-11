@@ -20,7 +20,9 @@ import pytest
 
 mcp_server = pytest.importorskip("mechlint.mcp.server", reason="needs the optional [mcp] extra")
 
-TOOLS = {"inspect_robot", "check_urdf", "compute_inertia", "torque_budget", "list_actuators"}
+READ_ONLY = {"inspect_robot", "check_urdf", "compute_inertia", "torque_budget", "list_actuators"}
+WRITES = {"write_inertials"}
+TOOLS = READ_ONLY | WRITES
 
 
 def call(name: str, **arguments: Any) -> dict[str, Any]:
@@ -41,11 +43,13 @@ def test_every_tool_built_so_far_is_exposed() -> None:
     assert {tool.name for tool in listed()} == TOOLS
 
 
-def test_every_tool_is_annotated_read_only() -> None:
-    """llms.md promises the only writing tool is write_inertials, which is M3."""
+def test_only_write_inertials_may_write() -> None:
+    """llms.md promises exactly one writing tool. A host gates on this annotation,
+    so getting it wrong on an inspect tool costs the user a permission prompt --
+    and getting it wrong on the writing one costs them a file."""
     for tool in listed():
         assert tool.annotations is not None, tool.name
-        assert tool.annotations.read_only_hint is True, tool.name
+        assert tool.annotations.read_only_hint is (tool.name in READ_ONLY), tool.name
 
 
 def test_every_tool_describes_itself() -> None:
@@ -166,6 +170,7 @@ def test_list_actuators_also_reads_a_projects_own_table(tmp_path, config: str) -
         ("torque_budget", {}, "give either"),
         ("list_actuators", {"actuator": "nope"}, "unknown actuator"),
         ("list_actuators", {"kind": "hobby-servo"}, "unknown kind"),
+        ("list_actuators", {"actuator_db": "does/not/exist.yaml"}, "actuator table not found"),
     ],
 )
 def test_a_bad_argument_is_a_result_not_a_traceback(
@@ -205,3 +210,207 @@ def test_a_per_call_scale_overrides_the_config(dast1_dir: Path) -> None:
 
     assert payload["model_scale"] == pytest.approx(0.001)
     assert payload["reach_m"] == pytest.approx(0.00759)
+
+
+# --------------------------------------------------------------------------- overrides
+
+
+def test_a_link_mass_override_answers_a_what_if_without_touching_the_file(config: str) -> None:
+    """Suppose arm_1 came out at 80 g -- the whole point of the argument overrides."""
+    before = call("torque_budget", config=config, payload_g=[200.0])
+    after = call("torque_budget", config=config, payload_g=[200.0], link_mass_g={"arm_1_link": 80})
+    worst = {j["joint"]: j["cases"][-1]["max_torque_Nm"] for j in before["joints"]}
+    lighter = {j["joint"]: j["cases"][-1]["max_torque_Nm"] for j in after["joints"]}
+
+    assert lighter["joint_2"] < worst["joint_2"]
+    assert after["overrides"] == {"payload_g": [200.0], "link_mass_g": {"arm_1_link": 80.0}}
+    assert before["overrides"] == {"payload_g": [200.0]}  # only what was actually overridden
+
+
+def test_every_override_comes_back_in_the_result(config: str) -> None:
+    """An answer that cannot say what it assumed cannot be quoted."""
+    payload = call(
+        "torque_budget",
+        config=config,
+        payload_g=[150.0],
+        voltage=4.8,
+        joint_actuators={"joint_2": "ds3225"},
+        mount="ceiling",
+        link_mass_g={"arm_2_link": 60.0},
+    )
+
+    assert payload["overrides"] == {
+        "payload_g": [150.0],
+        "voltage_V": 4.8,
+        "joint_actuators": {"joint_2": "ds3225"},
+        "mount": "ceiling",
+        "link_mass_g": {"arm_2_link": 60.0},
+    }
+
+
+def test_an_unchanged_project_reports_no_overrides(config: str) -> None:
+    assert call("compute_inertia", config=config)["overrides"] == {}
+
+
+def test_a_mass_override_for_a_link_that_does_not_exist_is_refused(config: str) -> None:
+    """Applying it to nothing would answer with the unmodified robot, which looks right."""
+    payload = call("compute_inertia", config=config, link_mass_g={"arm_9_link": 80.0})
+
+    assert payload["ok"] is False
+    assert "no link called 'arm_9_link'" in payload["error"]
+
+
+# --------------------------------------------------------------------------- writing
+
+
+def test_write_inertials_writes_macros_and_says_what_it_skipped(tmp_path, config: str) -> None:
+    target = tmp_path / "inertials.xacro"
+    payload = call("write_inertials", config=config, output_path=str(target))
+
+    assert payload["ok"] is True
+    assert payload["created"] is True
+    assert "base_link" in payload["links"]
+    assert "mechlint_inertial_base_link" in target.read_text()
+    # Not an error, but the reason has to be visible: a link missing from the file
+    # silently is a link whose placeholder inertia stays in the robot.
+    assert "wrist_link" in payload["skipped"]
+    assert payload["include"] == '<xacro:include filename="inertials.xacro"/>'
+
+
+def test_writing_twice_changes_nothing(tmp_path, config: str) -> None:
+    """idempotent_hint=True is a promise to the host. This is the promise."""
+    target = tmp_path / "inertials.xacro"
+    call("write_inertials", config=config, output_path=str(target))
+    first = target.read_text()
+    again = call("write_inertials", config=config, output_path=str(target))
+
+    assert again["unchanged"] is True
+    assert again["created"] is False
+    assert target.read_text() == first
+
+
+def test_write_inertials_refuses_a_file_it_did_not_generate(tmp_path, config: str) -> None:
+    target = tmp_path / "handwritten.xacro"
+    target.write_text("<robot><!-- mine --></robot>")
+
+    payload = call("write_inertials", config=config, output_path=str(target))
+
+    assert payload["ok"] is False
+    assert "not generated by mechlint" in payload["error"]
+    assert "force" in payload["hint"]
+    assert target.read_text() == "<robot><!-- mine --></robot>"
+
+
+def test_a_directory_target_gets_the_default_filename(tmp_path, config: str) -> None:
+    payload = call("write_inertials", config=config, output_path=str(tmp_path))
+
+    assert Path(payload["path"]).name == "inertials.xacro"
+
+
+# ------------------------------------------------------- the project's own actuator table
+
+
+@pytest.fixture
+def project_with_its_own_servo(tmp_path, config: str) -> str:
+    """The DAST-1 config, plus a servo that exists only in this project's table."""
+    (tmp_path / "my_servos.yaml").write_text(
+        "actuators:\n  hs645:\n    name: HS-645MG\n    vendor: Hitec\n"
+        "    kind: hobby_servo\n    stall_torque_Nm: { 6.0: 0.932 }\n"
+        "    recommended_voltage: 6.0\n    mass_g: 55.2\n"
+        "    source_url: http://example.invalid/hs645\n    source_date: 2026-09-10\n"
+        "    source: invented for a test\n    confidence: low\n"
+    )
+    project = tmp_path / "mechlint.yaml"
+    # Paths in a config are relative to the config, so a copy living somewhere else has
+    # to point back at the fixture explicitly rather than at its own empty directory.
+    fixture = Path(config).resolve().parent
+    project.write_text(
+        Path(config)
+        .read_text()
+        .replace("description: urdf/", f"description: {fixture}/urdf/")
+        .replace(
+            'description: ".", controller: "."',
+            f'description: "{fixture}", controller: "{fixture}"',
+        )
+        .replace("materials:", "actuator_db: my_servos.yaml\n\nmaterials:")
+        .replace("actuator: mg996r, drives: joint_1", "actuator: hs645, drives: joint_1")
+        .replace("joint_1: mg996r", "joint_1: hs645")
+    )
+    return str(project)
+
+
+def test_check_urdf_judges_u007_against_the_projects_own_table(
+    project_with_its_own_servo: str,
+) -> None:
+    """U007 read only the bundled table, so a project's own servo came back as a FAIL that
+    said the servo did not exist. `mechlint check` got this right and `check_urdf` did not:
+    one project, two doors, two answers."""
+    payload = call("check_urdf", config=project_with_its_own_servo)
+    messages = " ".join(f["message"] for f in payload["findings"])
+
+    assert "unknown actuator" not in messages
+
+
+def test_compute_inertia_resolves_a_servo_only_the_project_knows(
+    project_with_its_own_servo: str,
+) -> None:
+    """An unresolved servo is mass that quietly leaves the robot, which makes every
+    torque number downstream wrong in the direction that looks safe."""
+    payload = call("compute_inertia", config=project_with_its_own_servo)
+    components = [c for link in payload["links"] for c in link["components"]]
+    hs645 = [c for c in components if c["label"] == "hs645"]
+
+    assert [c for c in components if not c["ok"]] == []
+    assert hs645[0]["mass_kg"] == pytest.approx(0.0552)
+
+
+def test_write_inertials_uses_the_projects_table_too(tmp_path, project_with_its_own_servo) -> None:
+    """The file it writes carries the masses; the wrong database would bake in a lighter arm."""
+    payload = call(
+        "write_inertials",
+        config=project_with_its_own_servo,
+        output_path=str(tmp_path / "gen.xacro"),
+    )
+
+    assert payload["ok"] is True
+    assert "base_link" in payload["links"]
+
+
+def test_a_per_call_actuator_table_beats_the_config(tmp_path, config: str) -> None:
+    """The CLI has --actuator-db; without this the chat could not try an unlisted servo
+    at all, which is exactly the what-if the tool descriptions promise."""
+    table = tmp_path / "one_servo.yaml"
+    table.write_text(
+        "actuators:\n  monster:\n    name: Monster\n    vendor: Nobody\n"
+        "    kind: hobby_servo\n    stall_torque_Nm: { 6.0: 40.0 }\n"
+        "    recommended_voltage: 6.0\n    mass_g: 500\n"
+        "    source_url: http://example.invalid/monster\n    source_date: 2026-09-10\n"
+        "    source: invented for a test\n    confidence: low\n"
+    )
+    payload = call(
+        "torque_budget",
+        config=config,
+        actuator_db=str(table),
+        joint_actuators={"joint_2": "monster"},
+        payload_g=[200.0],
+    )
+    joints = {j["joint"]: j for j in payload["joints"]}
+
+    assert joints["joint_2"]["actuator_name"] == "Monster"
+    assert joints["joint_2"]["cases"][-1]["ok"] is True
+    assert joints["joint_1"]["actuator"] == "mg996r"  # the bundled entries survive
+
+
+def test_the_payload_can_be_hung_from_a_named_link(config: str) -> None:
+    """The core has always taken this; neither door could reach it until now."""
+    payload = call("torque_budget", config=config, payload_g=[200.0], payload_at="wrist_link")
+
+    assert payload["payload_at"] == "wrist_link"
+    assert payload["overrides"]["payload_at"] == "wrist_link"
+
+
+def test_a_payload_link_that_does_not_exist_is_a_result_not_a_traceback(config: str) -> None:
+    payload = call("torque_budget", config=config, payload_at="nose")
+
+    assert payload["ok"] is False
+    assert "no link called 'nose'" in payload["error"]

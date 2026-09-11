@@ -1,0 +1,169 @@
+# The mechanics Q&A benchmark: questions a person actually asks about DAST-1, each
+# tied to the tool call that answers it and the number that answer has to contain.
+#
+# No LLM runs here. `pytest tests/bench` and `python -m tests.bench.run` both drive
+# the MCP tools directly, so a regression in the physics or in a tool's JSON shape
+# fails in CI rather than in a chat. See README.md for the manual half.
+#
+# `{dast1}` is the pinned fixture directory. Tolerances are absolute; a question
+# with no `tol` is compared exactly, which is right for a verdict and wrong for
+# a torque.
+
+- id: reach
+  question: How far can DAST-1 reach?
+  tool: inspect_robot
+  arguments: { config: "{dast1}/mechlint.yaml" }
+  expect:
+    - { path: "reach_m", value: 0.759, tol: 0.001 }
+
+- id: units
+  question: What unit is this model drawn in?
+  note: The whole torque budget is wrong by a factor of a thousand if this is missed.
+  tool: inspect_robot
+  arguments: { config: "{dast1}/mechlint.yaml" }
+  expect:
+    - { path: "model_scale", value: 0.1, tol: 1.0e-12 }
+
+- id: placeholders
+  question: Can I trust the inertia numbers already in the URDF?
+  note: U005 is the placeholder mass, U006 the placeholder tensor. Both are in there.
+  tool: check_urdf
+  arguments: { config: "{dast1}/mechlint.yaml" }
+  expect:
+    - { path: "ok", value: false }
+    - { path: "findings[check=U005].severity", value: warn }
+    - { path: "findings[check=U006].severity", value: warn }
+
+- id: effort_limits
+  question: Do the effort limits in the URDF match the servos that are actually fitted?
+  note: 20 N*m declared against an MG996R's 1.079 N*m at 6 V.
+  tool: check_urdf
+  arguments: { config: "{dast1}/mechlint.yaml" }
+  expect:
+    - { path: "findings[check=U007].severity", value: fail }
+
+- id: arm_mass
+  question: How much mass do the joints actually have to hold up?
+  note: Not the total. The base and the tripod-mounted Kinect are held up by the table.
+  tool: compute_inertia
+  arguments: { config: "{dast1}/mechlint.yaml" }
+  expect:
+    - { path: "carried_mass_kg", value: 0.483, tol: 0.002 }
+
+- id: servo_masses
+  question: Are the servos counted in the link masses, and where did their weight come from?
+  tool: compute_inertia
+  arguments: { config: "{dast1}/mechlint.yaml" }
+  expect:
+    - { path: "links[link=arm_1_link].components[label=mg996r].mass_kg", value: 0.055, tol: 1.0e-09 }
+    - { path: "links[link=arm_1_link].components[label=mg996r].ok", value: true }
+
+- id: mg996r_at_joint_2
+  question: Does an MG996R suffice at joint_2 with a 100 g payload?
+  note: >-
+    The milestone's own done-when question. 1.65 N*m worst case against 1.079 N*m
+    of stall at 6 V, and a safety factor of 2 on top: a margin of 0.33.
+  tool: torque_budget
+  arguments: { config: "{dast1}/mechlint.yaml", payload_g: [100.0] }
+  expect:
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].max_torque_Nm", value: 1.651, tol: 0.002 }
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].available_Nm", value: 1.079, tol: 1.0e-09 }
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].margin", value: 0.327, tol: 0.002 }
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].ok", value: false }
+    - { path: "joints[joint=joint_2].confidence", value: low }
+
+- id: empty_arm
+  question: Forget the payload — can it even hold itself up?
+  note: The zero-payload case is in every report whether or not anyone asked for it.
+  tool: torque_budget
+  arguments: { config: "{dast1}/mechlint.yaml", payload_g: [100.0] }
+  expect:
+    - { path: "payloads_g[0]", value: 0.0, tol: 1.0e-12 }
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.0].max_torque_Nm", value: 1.053, tol: 0.002 }
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.0].ok", value: false }
+
+- id: unbounded_margin
+  question: Why is there no margin for joint_1?
+  note: >-
+    Its axis is vertical, so gravity applies no torque about it at any pose. A null
+    margin with ok=true is unbounded, not zero, and the two must not read alike.
+  tool: torque_budget
+  arguments: { config: "{dast1}/mechlint.yaml", payload_g: [100.0] }
+  expect:
+    - { path: "joints[joint=joint_1].cases[payload_kg=0.1].max_torque_Nm", value: 0.0, tol: 1.0e-12 }
+    - { path: "joints[joint=joint_1].cases[payload_kg=0.1].margin", value: null }
+    - { path: "joints[joint=joint_1].cases[payload_kg=0.1].ok", value: true }
+
+- id: not_judged
+  question: Which joints did you not judge, and why?
+  note: Silence about joint_6 would read as a pass. It has no servo assigned yet.
+  tool: torque_budget
+  arguments: { config: "{dast1}/mechlint.yaml", payload_g: [100.0] }
+  expect:
+    - { path: "unjudged", value: [joint_6] }
+    - { path: "joints[joint=joint_6].cases[payload_kg=0.1].ok", value: null }
+
+- id: what_would_fit
+  question: If the MG996R is too weak at joint_2, what should I buy instead?
+  note: >-
+    Nothing in the database reaches 3.30 N*m. An empty result is the answer: this is
+    a geometry problem, not a motor-selection problem.
+  tool: list_actuators
+  arguments: { min_torque_Nm: 3.302, voltage: 6.0 }
+  expect:
+    - { path: "count", value: 0 }
+
+- id: what_fits_at_all
+  question: What is the strongest thing in the database at 6 V?
+  tool: list_actuators
+  arguments: { min_torque_Nm: 1.0, voltage: 6.0 }
+  expect:
+    - { path: "actuators[0].key", value: ds3225 }
+    - { path: "actuators[0].torque_at_voltage.torque_Nm", value: 2.059, tol: 1.0e-09 }
+    - { path: "len actuators", value: 7 }
+
+- id: datasheet_provenance
+  question: Where does the MG996R stall torque figure come from?
+  note: Every margin is worth exactly what its datasheet is worth, so this is quotable.
+  tool: list_actuators
+  arguments: { actuator: mg996r }
+  expect:
+    - { path: "actuator.confidence", value: low }
+    - { path: "actuator.source_url", value: "https://servodatabase.com/servo/towerpro/mg996r" }
+    - { path: "actuator.source_date", value: "2026-09-09" }
+
+- id: ceiling_mount
+  question: Would hanging it from the ceiling help joint_2?
+  note: >-
+    No. Gravity flips, the worst-case magnitude does not. Worth a benchmark entry
+    because it is the kind of thing a model will happily guess at.
+  tool: torque_budget
+  arguments: { config: "{dast1}/mechlint.yaml", payload_g: [100.0], mount: ceiling }
+  expect:
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].max_torque_Nm", value: 1.651, tol: 0.002 }
+    - { path: "overrides.mount", value: ceiling }
+
+- id: lighter_arm
+  question: What if arm_1 came out at 80 g instead of 178 g — would 200 g be within reach?
+  note: 2.15 N*m instead of 2.25. Still nowhere near the 1.079 N*m the servo gives.
+  tool: torque_budget
+  arguments:
+    config: "{dast1}/mechlint.yaml"
+    payload_g: [200.0]
+    link_mass_g: { arm_1_link: 80.0 }
+  expect:
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.2].max_torque_Nm", value: 2.152, tol: 0.002 }
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.2].ok", value: false }
+    - { path: "overrides.link_mass_g.arm_1_link", value: 80.0, tol: 1.0e-09 }
+
+- id: lower_voltage
+  question: I only have a 4.8 V supply. What does that cost me?
+  note: >-
+    Stall torque is stored per listed voltage and never interpolated between two,
+    so 4.8 V is a different datasheet row: 1.079 N*m becomes 0.922.
+  tool: torque_budget
+  arguments: { config: "{dast1}/mechlint.yaml", payload_g: [100.0], voltage: 4.8 }
+  expect:
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].available_Nm", value: 0.922, tol: 1.0e-09 }
+    - { path: "joints[joint=joint_2].torque_basis", value: stall torque at 4.8 V }
+    - { path: "overrides.voltage_V", value: 4.8, tol: 1.0e-09 }

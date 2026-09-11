@@ -174,3 +174,19 @@ class MechlintConfig(_Strict):
     @property
     def actuator_db_path(self) -> Path | None:
         return None if self.actuator_db is None else self.resolve(self.actuator_db)
+
+
+def applied_overrides(**values: object) -> dict[str, object]:
+    """The per-call overrides that were actually given, for a report to echo back.
+
+    A what-if answer is only quotable if it carries its own assumptions: "2.25 N*m"
+    means nothing without "at 200 g, on the ceiling, at 4.8 V". Callers pass every
+    override they accepted, and the ones left unset drop out here rather than
+    filling the result with nulls that read like decisions.
+    """
+    kept: dict[str, object] = {}
+    for name, value in values.items():
+        if value is None or (isinstance(value, dict | list | tuple) and not value):
+            continue
+        kept[name] = value
+    return kept
