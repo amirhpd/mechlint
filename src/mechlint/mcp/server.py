@@ -338,7 +338,9 @@ def list_actuators(
         float | None, Field(description="Only entries that reach this torque at `voltage`.")
     ] = None,
     max_mass_g: Annotated[float | None, Field(description="Only entries no heavier.")] = None,
-    kind: Annotated[str | None, Field(description="hobby_servo, smart_servo or stepper.")] = None,
+    kind: Annotated[
+        str | None, Field(description="hobby_servo, smart_servo, stepper or dc_gearmotor.")
+    ] = None,
     voltage: Annotated[
         float | None, Field(description="Supply volts. Without it, each entry's recommended one.")
     ] = None,

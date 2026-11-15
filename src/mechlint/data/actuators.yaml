@@ -82,6 +82,56 @@ actuators:
       Same case and same mounting as the DS3218, so it is a drop-in upgrade when a joint
       is short of torque. Sourced from the same reseller table, with the same caveat.
 
+  ds3240:
+    name: DS3240MG
+    vendor: DSServo
+    kind: hobby_servo
+    stall_torque_Nm: { 5.0: 3.530, 6.8: 4.413 }
+    no_load_speed_rpm: { 5.0: 50.0, 6.8: 58.8 }
+    recommended_voltage: 6.8
+    voltage_range: [4.8, 6.8]
+    mass_g: 58.0
+    dims_mm: [40.0, 20.0, 40.5]
+    mounting: standard 40 mm servo, 25T spline
+    interface: PWM
+    source_url: https://vxb.com/products/beefy-40-kg-digital-rc-servo-with-waterproof-full
+    source_date: 2026-11-15
+    source: >-
+      "Stall torque: 36 kg/cm at 5V; 45 kg/cm at 6.8V", "Speed: 0.2 sec/60° at 5V; 0.17
+      sec/60° at 6.8V", "Voltage: 4.8-6.8V DC". Mass and size from roboticsdna.in
+      ("58g±2g", "40 x 20 x 40.5 mm").
+    confidence: low
+    note: >-
+      Reseller listings only -- DSServo publishes no datasheet. Another listing (roboticsdna.in)
+      quotes 39.5 / 34.5 kgf*cm, but its oz*in figures are the DS3218's 19 / 21.5 kgf*cm, so
+      that table was copied from the smaller part. Same case as the DS3218 and DS3225, so it
+      is the next drop-in step up. Speed is quoted without a load condition; read as no-load.
+
+  ds51150_12v:
+    name: DS51150-12V
+    vendor: DSServo
+    kind: hobby_servo
+    stall_torque_Nm: { 10.0: 12.258, 12.0: 13.925, 12.6: 14.710 }
+    no_load_speed_rpm: { 10.0: 41.7, 12.0: 47.6, 12.6: 52.6 }
+    recommended_voltage: 12.0
+    voltage_range: [10.0, 12.6]
+    gear_ratio: 357.0
+    mass_g: 175.0
+    dims_mm: [65.0, 30.0, 48.0]
+    mounting: large-scale 65 mm servo case, 25T spline (18T on the RC-car variant)
+    interface: PWM
+    source_url: https://aifitlab.com/products/dsservo-ds51150-servo-motor
+    source_date: 2026-11-15
+    source: >-
+      125 kgf*cm @ 10 V, 142 kgf*cm @ 12 V, 150 kgf*cm @ 12.6 V; 0.24 / 0.21 / 0.19 s/60deg
+      no-load; stall current 7.4 / 8.0 / 8.3 A. Same figures on kitsguru.com (RDS51150-12V).
+    confidence: low
+    note: >-
+      Reseller tables only -- DSServo publishes no datasheet. Other sellers (Amazon/Stemedu,
+      druav.com) quote 150 / 165 / 173 kgf*cm for the same part; the lower set is kept here
+      because it matches the "150 kg" name. Mass is quoted anywhere from 162 g to 265 g.
+      It pulls about 8 A at stall, so size the supply and wiring for that, not for the signal.
+
   xl430_w250:
     name: XL430-W250-T
     vendor: ROBOTIS
@@ -146,6 +196,33 @@ actuators:
       Two axes in one case. The torque above is per axis, but mass_g is the whole unit --
       assign it to both joints it drives and mechlint counts 98.2 g twice, so declare the
       component once, on the link that actually carries it.
+
+  n20_50:
+    name: N20 micro metal gearmotor, 50:1, straight shaft
+    vendor: generic (GA12-N20 form factor)
+    kind: dc_gearmotor
+    stall_torque_Nm: { 5.0: 0.059, 12.0: 0.141 }
+    no_load_speed_rpm: { 5.0: 191.7, 12.0: 460.0 }
+    recommended_voltage: 5.0
+    gear_ratio: 50.0
+    mass_g: 10.0
+    dims_mm: [12.0, 10.0, 34.0]
+    mounting: N20 gearbox face (12 x 10 mm, 2x M1.6), 3 mm straight output shaft
+    interface: DC voltage via an H-bridge driver
+    source_url: https://www.servocity.com/460-rpm-micro-gear-motor/
+    source_date: 2026-11-15
+    source: >-
+      "Speed (No Load @ 12VDC) 460 rpm", "Current (Stall @ 12VDC) 1600mA", "Torque (Stall
+      @ 12VDC) 20 oz-in" (= 0.141 N*m). The 5 V row is NOT quoted: it is the 12 V row
+      scaled by 5/12. Mass and size from the Handsontec GA12-N20 datasheet ("Net Weight:
+      10g", "Total Length: 34mm", 12 x 10 mm gearbox face).
+    confidence: low
+    note: >-
+      No source publishes a 5 V figure for a 50:1 N20. N20s are sold with different motor
+      windings, so the same gearbox can give very different torque -- check the rpm printed
+      on your listing against 191.7 rpm at 5 V. No vendor voltage range is stored for the
+      same reason. Stall figures on these motors are theoretical: stalling can strip the
+      gearbox, so do not size a joint against them with a thin margin.
 
   nema17_pg5:
     name: 17HS19-1684S-PG5 (NEMA 17 + 5.18:1 planetary)

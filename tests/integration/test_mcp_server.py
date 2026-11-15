@@ -129,11 +129,15 @@ def test_torque_budget_echoes_the_overrides_it_was_given(config: str) -> None:
 
 def test_list_actuators_answers_what_would_fit_instead(config: str) -> None:
     payload = call("list_actuators", min_torque_Nm=2.0, voltage=6.8)
-    keys = [entry["key"] for entry in payload["actuators"]]
+    entries = {entry["key"]: entry for entry in payload["actuators"]}
+    keys = list(entries)
 
-    assert keys == ["ds3225", "ds3218", "nema17_pg5"]  # the stepper counts, at 520 g
+    # Only the entries we know about are pinned, in order, so a new one can join the list.
+    known = ["ds3225", "ds3218", "nema17_pg5"]  # the stepper counts, at 520 g
+    assert [key for key in keys if key in known] == known
+    assert "mg996r" not in keys  # too weak, and 6.8 V is above its range anyway
     assert all(entry["source_url"] for entry in payload["actuators"])
-    assert payload["actuators"][0]["torque_at_voltage"]["basis"] == "stall torque at 6.8 V"
+    assert entries["ds3225"]["torque_at_voltage"]["basis"] == "stall torque at 6.8 V"
 
 
 def test_list_actuators_returns_one_entry_with_its_source(config: str) -> None:

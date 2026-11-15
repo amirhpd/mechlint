@@ -432,7 +432,7 @@ def actuators(
     ] = None,
     kind: Annotated[
         str | None,
-        typer.Option("--kind", help="hobby_servo, smart_servo or stepper."),
+        typer.Option("--kind", help="hobby_servo, smart_servo, stepper or dc_gearmotor."),
     ] = None,
     voltage: Voltage = None,
     config: Config = None,

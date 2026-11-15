@@ -26,11 +26,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mechlint.core.materials import Confidence
 
-Kind = Literal["hobby_servo", "smart_servo", "stepper"]
+Kind = Literal["hobby_servo", "smart_servo", "stepper", "dc_gearmotor"]
 
 #: The same names as a set, so a mistyped filter can be rejected rather than quietly
 #: matching nothing -- an empty result reads as a real answer, which is the worst outcome.
-KINDS: frozenset[str] = frozenset(("hobby_servo", "smart_servo", "stepper"))
+KINDS: frozenset[str] = frozenset(("hobby_servo", "smart_servo", "stepper", "dc_gearmotor"))
 
 #: Datasheets quote kgf*cm; mechlint stores N*m. Here so the conversion is written once.
 KGFCM_TO_NM = 0.0980665
@@ -102,7 +102,7 @@ class Actuator(BaseModel):
         if not self.stall_torque_Nm and self.holding_torque_Nm is None:
             raise ValueError(
                 f"actuator {self.key!r} has no torque: give stall_torque_Nm "
-                "{voltage: N*m} for a servo, or holding_torque_Nm for a stepper"
+                "{voltage: N*m} for a servo or DC gearmotor, or holding_torque_Nm for a stepper"
             )
         return self
 
@@ -176,6 +176,20 @@ class Actuator(BaseModel):
             return f"{voltage:g} V is above the {low:g}-{high:g} V operating range"
         return None
 
+    def runs_on(self, voltage: float | None) -> bool:
+        """Whether this supply gives a torque figure that can be trusted.
+
+        False when the supply is outside the vendor's operating range, or -- with no
+        range given -- below every voltage the stall table lists, where the only figure
+        available OVER-states the actuator. Either way, ranking it would recommend a
+        part that cannot deliver on that supply.
+        """
+        if voltage is None:
+            return True
+        if self.voltage_note(voltage) is not None:
+            return False
+        return not (self.stall_torque_Nm and voltage < min(self.stall_torque_Nm) - 1e-9)
+
 
 class ActuatorDatabase(BaseModel):
     """The whole table, keyed by the short name used in ``mechlint.yaml``."""
@@ -237,6 +251,8 @@ class ActuatorDatabase(BaseModel):
 
         This is the "what else would fit?" query -- the one an LLM asks after a
         joint fails T001, and the reason the database is worth curating at all.
+        With a ``voltage``, entries that cannot run on that supply are left out
+        rather than ranked on a figure they would never reach.
         """
         if kind is not None and kind not in KINDS:
             raise ValueError(f"unknown kind {kind!r}; use {', '.join(sorted(KINDS))}")
@@ -245,6 +261,8 @@ class ActuatorDatabase(BaseModel):
             if kind is not None and actuator.kind != kind:
                 continue
             if max_mass_g is not None and actuator.mass_g > max_mass_g:
+                continue
+            if not actuator.runs_on(voltage):
                 continue
             if (
                 min_torque_Nm is not None

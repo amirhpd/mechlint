@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from mechlint import __version__
 from mechlint.cli.main import app
+from mechlint.core.actuators import bundled
 from tests.unit.urdf_builder import box, inertial, write_urdf
 
 SUBCOMMANDS = [
@@ -244,7 +245,12 @@ def test_actuators_json_is_a_parseable_list() -> None:
     result = runner.invoke(app, ["actuators", "-t", "2.0", "-f", "json"])
     payload = json.loads(result.output)
 
-    assert [entry["key"] for entry in payload] == ["ds3225", "ds3218", "nema17_pg5"]
+    keys = [entry["key"] for entry in payload]
+
+    # Only the entries we know about are pinned, in order, so a new one can join the list.
+    known = ["ds3225", "ds3218", "nema17_pg5"]
+    assert [key for key in keys if key in known] == known
+    assert "mg996r" not in keys  # 1.08 N*m does not reach 2.0
     assert all(entry["source_url"] for entry in payload)
 
 
@@ -260,7 +266,7 @@ def test_actuators_json_of_one_entry_is_an_object() -> None:
 def test_actuators_markdown_links_every_datasheet() -> None:
     result = runner.invoke(app, ["actuators", "-f", "markdown"])
 
-    assert result.output.count("[datasheet](http") == 7
+    assert result.output.count("[datasheet](http") == len(bundled())
 
 
 def test_an_empty_result_says_so_rather_than_printing_a_bare_header() -> None:

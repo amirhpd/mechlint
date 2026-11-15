@@ -58,7 +58,8 @@ def test_every_bundled_entry_carries_a_source() -> None:
 
 
 def test_the_plans_first_seven_entries_are_all_there() -> None:
-    assert set(bundled().actuators) == {
+    # A superset, not equality: adding an actuator to the table must not break this.
+    assert set(bundled().actuators) >= {
         "mg996r",
         "ds3218",
         "ds3225",
@@ -143,8 +144,46 @@ def test_a_stepper_ignores_voltage_because_current_is_what_sets_its_torque() -> 
 
 def test_matching_answers_what_would_fit_instead() -> None:
     found = bundled().matching(min_torque_Nm=2.0, voltage=6.8, max_mass_g=100)
+    keys = [a.key for a in found]
 
-    assert [a.key for a in found] == ["ds3225", "ds3218"]  # strongest first, stepper too heavy
+    # Only the entries we know about are pinned, in order, so a new one can join the list.
+    known = ["ds3240", "ds3225", "ds3218"]  # strongest first
+    assert [key for key in keys if key in known] == known
+    assert "nema17_pg5" not in keys  # strong enough, but 520 g is over the 100 g limit
+    torques = [a.torque_limit(6.8).torque_Nm for a in found]
+    assert torques == sorted(torques, reverse=True)
+
+
+def test_matching_leaves_out_what_cannot_run_on_the_supply() -> None:
+    """A 10-12.6 V servo is not "the strongest thing at 6 V" -- it does not run at 6 V."""
+    keys = [a.key for a in bundled().matching(voltage=6.0)]
+
+    assert "ds51150_12v" not in keys  # 6 V is below its 10-12.6 V range
+    assert "xl430_w250" not in keys  # 6 V is below its 6.5-12 V range
+    assert "ds3225" in keys  # 6 V is inside its range, between two listed voltages
+    assert "nema17_pg5" in keys  # a stepper's torque does not depend on the supply
+
+
+def test_runs_on_refuses_a_voltage_below_the_stall_table_without_a_range() -> None:
+    """With no vendor range, the lowest listed voltage is the floor: below it, the only
+    figure available over-states the part."""
+    servo = bundled()["mg996r"].model_copy(update={"voltage_range": None})
+
+    assert servo.runs_on(6.0)
+    assert servo.runs_on(None)
+    assert not servo.runs_on(4.0)
+
+
+def test_the_n20_5v_row_is_its_12v_datasheet_row_scaled() -> None:
+    """The 5 V figures are calculated, not quoted: a brushed DC motor's stall torque and
+    no-load speed scale with its supply. This keeps the calculation checkable."""
+    n20 = bundled()["n20_50"]
+
+    assert n20.kind == "dc_gearmotor"
+    assert n20.stall_torque_Nm[12.0] == pytest.approx(20 * 0.00706155, abs=5e-4)  # 20 oz*in
+    assert n20.stall_torque_Nm[5.0] == pytest.approx(n20.stall_torque_Nm[12.0] * 5 / 12, abs=5e-4)
+    assert n20.no_load_speed_rpm[5.0] == pytest.approx(460.0 * 5 / 12, abs=0.05)
+    assert "n20_50" in [a.key for a in bundled().matching(kind="dc_gearmotor")]
 
 
 def test_matching_can_be_narrowed_to_one_kind() -> None:
