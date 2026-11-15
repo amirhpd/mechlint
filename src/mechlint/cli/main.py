@@ -88,7 +88,17 @@ ActuatorDb = Annotated[
 ]
 Voltage = Annotated[
     float | None,
-    typer.Option("--voltage", "-V", help="Supply voltage. Overrides actuators.voltage."),
+    typer.Option("--voltage", "-V", help="Supply voltage to rate each actuator at."),
+]
+VoltageOverride = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--voltage",
+        "-V",
+        metavar="VOLTS|JOINT=VOLTS",
+        help="Supply voltage for this run only. A plain number puts every joint on that "
+        "supply; JOINT=VOLTS (repeatable) changes only the joints named.",
+    ),
 ]
 Payloads = Annotated[
     list[float] | None,
@@ -252,6 +262,33 @@ def _assignments(values: list[str] | None) -> dict[str, str | None]:
     return {joint: (key or None) for joint, key in _pairs(values, "--actuator").items()}
 
 
+def _voltage(values: list[str] | None) -> float | dict[str, float] | None:
+    """``--voltage``: one number for every joint, or ``JOINT=VOLTS`` pairs for some.
+
+    Both at once would make "which wins?" a question the reader has to ask, so it is
+    refused: give each joint its own pair instead.
+    """
+    if not values:
+        return None
+    pairs = [value for value in values if "=" in value]
+    if not pairs:
+        if len(values) > 1:
+            _fail("--voltage takes one number for every joint, or JOINT=VOLTS pairs")
+        try:
+            return float(values[0])
+        except ValueError:
+            _fail(f"--voltage {values[0]!r} is neither a number nor JOINT=VOLTS")
+    if len(pairs) != len(values):
+        _fail("--voltage: give one number for every joint, or JOINT=VOLTS pairs, not both")
+    volts = {}
+    for joint, text in _pairs(values, "--voltage").items():
+        try:
+            volts[joint] = float(text)
+        except ValueError:
+            _fail(f"--voltage {joint}={text!r}: volts must be a number")
+    return volts
+
+
 def _link_masses(values: list[str] | None) -> dict[str, float]:
     """``LINK=GRAMS`` pairs. A value that is not a number is a typo, not a zero."""
     masses = {}
@@ -387,7 +424,7 @@ def torque(
     xacro_arg: XacroArgs = None,
     output_format: Format = "table",
     payload: Payloads = None,
-    voltage: Voltage = None,
+    voltage: VoltageOverride = None,
     actuator: Assignments = None,
     mount: Mount = None,
     payload_at: PayloadAt = None,
@@ -403,7 +440,7 @@ def torque(
             project,
             actuators=_actuator_database(actuator_db, project),
             payloads_g=payload or None,
-            voltage=voltage,
+            voltage=_voltage(voltage),
             assignments=_assignments(actuator),
             mount=_mount_value(mount),
             payload_at=payload_at,
@@ -495,7 +532,7 @@ def check(
     xacro_arg: XacroArgs = None,
     output_format: Format = "table",
     payload: Payloads = None,
-    voltage: Voltage = None,
+    voltage: VoltageOverride = None,
     actuator: Assignments = None,
     mount: Mount = None,
     payload_at: PayloadAt = None,
@@ -512,7 +549,7 @@ def check(
             project,
             actuators=database,
             payloads_g=payload or None,
-            voltage=voltage,
+            voltage=_voltage(voltage),
             assignments=_assignments(actuator),
             mount=_mount_value(mount),
             payload_at=payload_at,

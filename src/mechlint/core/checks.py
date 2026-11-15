@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from mechlint.core import chain, units
 from mechlint.core.actuators import ActuatorDatabase
 from mechlint.core.actuators import bundled as bundled_actuators
-from mechlint.core.config import MechlintConfig
+from mechlint.core.config import MechlintConfig, joint_torque_basis, joint_torque_limit
 from mechlint.core.geometry import mass_properties
 from mechlint.core.urdf import RobotModel
 
@@ -78,8 +78,15 @@ CHECKS: dict[str, CheckSpec] = {
         CheckSpec(
             "U007",
             "Joint effort limit exceeds the actuator's stall torque",
-            "Lower <limit effort> to what the servo delivers; a controller tuned against "
-            "fiction is untuned.",
+            "Lower <limit effort> to what the servo delivers at the joint; a controller tuned "
+            "against fiction is untuned.",
+        ),
+        CheckSpec(
+            "U008",
+            "Actuator run outside its voltage range",
+            "Put the joint on a supply its actuator is rated for -- `voltage` on that joint "
+            "in actuators.joints -- or choose an actuator rated for this one. Outside the "
+            "range the datasheet figure is not what the part delivers.",
         ),
         CheckSpec(
             "M001",
@@ -105,6 +112,12 @@ CHECKS: dict[str, CheckSpec] = {
             "A link or joint in the config does not exist in the description. Usually a "
             "rename on one side only -- and a silently ignored motor is a torque number "
             "that is wrong in the safe-looking direction.",
+        ),
+        CheckSpec(
+            "D004",
+            "Component drives a joint that does not touch its link",
+            "A component that only says `drives` must be listed under that joint's parent or "
+            "child link -- whichever it is bolted to. Move it, or give it an `at:`.",
         ),
         CheckSpec(
             "D001",
@@ -199,16 +212,20 @@ def check_urdf(
         *_u005_placeholder_tensors(model),
         *_u006_masses(model),
         *_u007_effort_limits(model, config, database),
+        *_u008_supply_ranges(model, config, database),
         *_m001_meshes(model),
         *_d002_mounting(model, config),
         *_d003_names(model, config),
+        *component_side_findings(model, config),
     ]
     skipped = {
         "T001": "static torque is its own command: run `mechlint torque`",
         "D001": "drift arrives in M4",
     }
-    if config is None or not any(config.actuators.joints.values()):
-        skipped["U007"] = "needs actuators.joints in mechlint.yaml to say which servo is where"
+    if config is None or not any(config.actuators.drives().values()):
+        reason = "needs actuators.joints in mechlint.yaml to say which servo is where"
+        skipped["U007"] = reason
+        skipped["U008"] = reason
     return CheckReport(
         robot=model.name,
         source=model.path,
@@ -227,33 +244,101 @@ def _u007_effort_limits(
     means the clamp never engages and the joint is tuned against a motor nobody owns.
     URDF states effort in N*m whatever length unit the model uses, so this comparison
     needs no scaling -- and stall torque is the right side to compare against, not
-    rated torque: the limit is a ceiling, and stall is the ceiling.
+    rated torque: the limit is a ceiling, and stall is the ceiling. Each joint is
+    judged at its own supply, and against what reaches the *joint*: through a 2:1
+    stage, that is twice the motor's figure.
     """
     if config is None:
         return
-    voltage = config.actuators.voltage
-    for name, key in config.actuators.joints.items():
+    for name, drive in config.actuators.drives().items():
         joint = model.urdf.joint_map.get(name)
-        if not key or joint is None:
+        if drive is None or joint is None:
             continue
         effort = getattr(getattr(joint, "limit", None), "effort", None)
         if effort is None:
             continue
         try:
-            actuator = actuators[key]
+            actuator = actuators[drive.actuator]
         except KeyError as error:
             yield finding("U007", Severity.FAIL, name, str(error))
             continue
-        limit = actuator.torque_limit(voltage)
-        if float(effort) > limit.torque_Nm * (1.0 + 1e-9):
+        limit = actuator.torque_limit(drive.voltage)
+        available = joint_torque_limit(limit.torque_Nm, drive.transmission)
+        if float(effort) > available * (1.0 + 1e-9):
+            basis = joint_torque_basis(limit.basis, limit.torque_Nm, drive.transmission)
+            # The fallback notes are what make the number quotable: "12.3 N*m at 10 V" for a
+            # 6 V supply is a figure the servo never reaches, and the message must say so.
+            caveats = [
+                note
+                for note in (limit.note, actuator.voltage_note(drive.voltage))
+                if note is not None
+            ]
             yield finding(
                 "U007",
                 Severity.FAIL,
                 name,
                 f"<limit effort> is {float(effort):g} N*m, but {actuator.name} gives "
-                f"{limit.torque_Nm:.3g} N*m ({limit.basis}) -- "
-                f"{float(effort) / limit.torque_Nm:.3g}x what the servo can deliver",
+                f"{available:.3g} N*m at the joint ({basis}) -- "
+                f"{float(effort) / available:.3g}x what the drive can deliver"
+                + "".join(f"; {caveat}" for caveat in caveats),
             )
+
+
+def _u008_supply_ranges(
+    model: RobotModel, config: MechlintConfig | None, actuators: ActuatorDatabase
+) -> Iterator[Finding]:
+    """Is any actuator on a supply it is not rated for?
+
+    Independent of ``<limit effort>``: a 12 V servo on a 6 V rail is a problem
+    whatever the URDF claims, and the torque figure it is judged against is one
+    it does not reach. Fires when the supply is outside the vendor's range, or --
+    with no range given -- below every voltage the datasheet lists.
+    """
+    if config is None:
+        return
+    for name, drive in config.actuators.drives().items():
+        if drive is None or drive.voltage is None or name not in model.urdf.joint_map:
+            continue
+        if drive.actuator not in actuators:
+            continue  # U007 and T001 already say the key is unknown
+        actuator = actuators[drive.actuator]
+        if actuator.runs_on(drive.voltage):
+            continue
+        reason = actuator.voltage_note(drive.voltage) or (
+            f"{drive.voltage:g} V is below every voltage the datasheet lists "
+            f"({min(actuator.stall_torque_Nm):g} V and up)"
+        )
+        yield finding("U008", Severity.WARN, name, f"{actuator.name}: {reason}")
+
+
+def component_side_findings(model: RobotModel, config: MechlintConfig | None) -> list[Finding]:
+    """D004: a component that only says ``drives`` must be on one side of that joint.
+
+    Its place is inferred from the joint: on the parent it sits at the joint origin,
+    on the child at the child's own origin. Listed under any other link there is no
+    place to infer, and guessing one moves a servo's mass by a whole link.
+    """
+    found: list[Finding] = []
+    if config is None:
+        return found
+    for link, entries in config.components.items():
+        for entry in entries:
+            if entry.drives is None or entry.at is not None:
+                continue
+            joint = model.urdf.joint_map.get(entry.drives)
+            if joint is None or link in (joint.parent, joint.child):
+                continue
+            found.append(
+                finding(
+                    "D004",
+                    Severity.FAIL,
+                    f"components.{link}",
+                    f"{entry.actuator or 'component'} under {link!r} drives {entry.drives!r}, "
+                    f"which connects {joint.parent!r} and {joint.child!r}; give it an `at:` "
+                    "or list it under the link it is bolted to",
+                )
+            )
+    return found
 
 
 def _d003_names(model: RobotModel, config: MechlintConfig | None) -> Iterator[Finding]:

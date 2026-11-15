@@ -281,7 +281,7 @@ def test_silence_is_not_a_pass(tmp_path: Path) -> None:
     """Checks that need a milestone that has not landed say so instead of nothing."""
     report = _check(tmp_path, SANE)
 
-    assert set(report.skipped) == {"U007", "T001", "D001"}
+    assert set(report.skipped) == {"U007", "U008", "T001", "D001"}
     assert all(reason for reason in report.skipped.values())
 
 

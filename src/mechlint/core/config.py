@@ -71,14 +71,20 @@ class MaterialsConfig(_Strict):
 class Component(_Strict):
     """Mass that is not in the mesh — a servo, a battery, a gripper motor.
 
-    An ``actuator`` is looked up in the actuator database for its mass. It sits
-    at the joint it ``drives``, in the parent link, unless ``at`` says otherwise.
+    An ``actuator`` is looked up in the actuator database for its mass. List it
+    under the link it is bolted to -- the parent or the child of the joint it
+    ``drives`` -- and it sits on that joint, in the frame of the link you list it
+    under, unless ``at`` says otherwise. Listed under any other link, it needs an
+    ``at``: mechlint cannot know where it is (check D004).
     """
 
     actuator: str | None = None
     drives: str | None = Field(default=None, description="Joint this actuator drives.")
     mass_g: float | None = Field(default=None, gt=0.0)
-    at: Vec3 | None = Field(default=None, description="Position in the link frame, URDF units.")
+    at: Vec3 | None = Field(
+        default=None,
+        description="Position in the frame of the link it is listed under, URDF units.",
+    )
     note: str | None = None
 
     @model_validator(mode="after")
@@ -95,15 +101,95 @@ class Component(_Strict):
         return self
 
 
+class Transmission(_Strict):
+    """A gear stage, belt or capstan between the actuator's shaft and the joint."""
+
+    ratio: float = Field(
+        gt=0.0,
+        description="Joint-side teeth / motor-side teeth (or pulley diameters). Above 1 is a "
+        "reduction: a small gear on the motor driving a big one on the joint is ratio 2.0 for "
+        "a 1:2 stage, giving the joint twice the torque at half the speed.",
+    )
+    efficiency: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description="Fraction of the torque that survives the stage, 0..1. Left out, the "
+        "stage is treated as ideal (1.0) and every report says so.",
+    )
+
+    @property
+    def factor(self) -> float:
+        """What the actuator's torque is multiplied by on its way to the joint."""
+        return self.ratio * (1.0 if self.efficiency is None else self.efficiency)
+
+    def describe(self) -> str:
+        """The stage in a few words, for a report: ``x 2:1 stage x 0.95 efficiency``."""
+        if self.efficiency is None:
+            return f"x {self.ratio:g}:1 stage, ideal (no efficiency given)"
+        return f"x {self.ratio:g}:1 stage x {self.efficiency:g} efficiency"
+
+
+def joint_torque_limit(motor_Nm: float, transmission: Transmission | None) -> float:
+    """What reaches the joint: the actuator's figure times any gear stage."""
+    return motor_Nm if transmission is None else motor_Nm * transmission.factor
+
+
+def joint_torque_basis(basis: str, motor_Nm: float, transmission: Transmission | None) -> str:
+    """The basis line, naming the motor figure and the stage so neither is mistaken
+    for the other: a bare motor number must never read as the joint's."""
+    if transmission is None:
+        return basis
+    return f"{basis} ({motor_Nm:.3g} N*m) {transmission.describe()}"
+
+
+class JointDrive(_Strict):
+    """The long form of one ``actuators.joints`` entry: the actuator and how it is driven."""
+
+    actuator: str = Field(description="Key into the actuator database.")
+    voltage: float | None = Field(
+        default=None,
+        gt=0.0,
+        description="This joint's supply voltage. Wins over actuators.voltage.",
+    )
+    transmission: Transmission | None = Field(
+        default=None, description="A gear stage between the actuator and the joint, if any."
+    )
+
+
 class ActuatorsConfig(_Strict):
     voltage: float | None = Field(
-        default=None, gt=0.0, description="Supply voltage; stall torque is quoted per voltage."
+        default=None,
+        gt=0.0,
+        description="Default supply voltage for every joint that does not give its own; stall "
+        "torque is quoted per voltage.",
     )
-    joints: dict[str, str | None] = Field(
+    joints: dict[str, str | JointDrive | None] = Field(
         default_factory=dict,
-        description="Actuator per joint. An explicit null means 'no servo yet' — torque is "
-        "reported for that joint but not judged.",
+        description="Actuator per joint: a key (`joint_1: mg996r`), or the long form "
+        "`{actuator, voltage, transmission}` for a joint on its own supply rail or behind a "
+        "gear stage. An explicit null means 'no servo yet' — torque is reported for that "
+        "joint but not judged.",
     )
+
+    def drive(self, joint: str) -> JointDrive | None:
+        """One joint's drive in the long form, with the default voltage filled in.
+
+        The one place both spellings are read, so no caller parses them twice. None
+        when the joint has no actuator (absent, or an explicit null).
+        """
+        entry = self.joints.get(joint)
+        if entry is None:
+            return None
+        if isinstance(entry, str):
+            return JointDrive(actuator=entry, voltage=self.voltage) if entry else None
+        if entry.voltage is None:
+            return entry.model_copy(update={"voltage": self.voltage})
+        return entry
+
+    def drives(self) -> dict[str, JointDrive | None]:
+        """Every joint the config names, resolved by :meth:`drive`."""
+        return {joint: self.drive(joint) for joint in self.joints}
 
 
 class Scenario(_Strict):

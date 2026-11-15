@@ -62,15 +62,21 @@ inertia table by hand -- torque_budget searches thousands of poses for the worst
 one, and the pose is most of the answer. It is static: gravity holding, nothing
 accelerating, which is why it applies a safety factor and prints it. Report the
 margin and the actuator's confidence together; a 1.2x margin against a `low`
-confidence datasheet is not a pass. When a joint fails, call list_actuators with
-min_torque_Nm set to the required torque to say what would fit instead.
+confidence datasheet is not a pass. Each joint is judged at its own supply_V and
+through its own transmission (a gear stage multiplies the actuator's torque), so
+available_Nm is the torque at the joint, not the motor's figure. When a joint fails,
+call list_actuators with min_torque_Nm set to the failing case's motor_required_Nm --
+the required torque divided by any transmission -- and voltage set to that joint's
+supply_V, to say what would fit instead.
 
 Answer what-if questions with arguments, never by editing mechlint.yaml: payload_g,
 voltage, joint_actuators, actuator_db, mount, payload_at and link_mass_g all override
 the file for one call and come back in the result's `overrides`. Quote them alongside
-the numbers. What the user tells you that is not a hypothesis -- "joint_2 is an MG996R
-at 6 V" -- is a fact about their robot, and belongs in mechlint.yaml: offer to write it
-there.
+the numbers. voltage is one number for every joint, or {joint: volts} for some. What
+the user tells you that is not a hypothesis -- "joint_2 is an MG996R at 6 V", "joint_4
+goes through a 1:2 belt" -- is a fact about their robot, and belongs in mechlint.yaml
+(actuators.joints takes {actuator, voltage, transmission: {ratio, efficiency}}): offer to
+write it there.
 
 write_inertials is the only tool that writes. It writes one generated file that the
 description includes, never the description itself, and refuses a report computed
@@ -273,11 +279,18 @@ def torque_budget(
         Field(description="Payloads at the tip, in grams. One result column per value."),
     ] = None,
     voltage: Annotated[
-        float | None, Field(description="Supply volts. Overrides the config.")
+        float | dict[str, float] | None,
+        Field(
+            description="Supply volts for this call. One number puts every joint on that "
+            "supply; {joint: volts} changes only the joints named. Overrides the config."
+        ),
     ] = None,
     joint_actuators: Annotated[
         dict[str, str] | None,
-        Field(description="{joint: actuator key} for this call only, to try a different servo."),
+        Field(
+            description="{joint: actuator key} for this call only, to try a different servo. "
+            "The joint keeps its own supply and transmission."
+        ),
     ] = None,
     mount: Annotated[
         str | list[float] | None,
@@ -300,8 +313,11 @@ def torque_budget(
     """Worst-case static joint torque, and whether the assigned actuator holds it (T001).
 
     For each joint: the largest gravity torque over the sampled joint space, the
-    pose it happens at, the actuator's stall torque at the supply voltage, and the
-    margin against the safety factor. Static only -- gravity holding, nothing
+    pose it happens at, the torque available at the joint -- the actuator's stall
+    torque at that joint's supply (``supply_V``), times its transmission if it has
+    one -- and the margin against the safety factor. To find a replacement, search
+    ``list_actuators`` with ``motor_required_Nm``, not ``required_Nm``: it is already
+    divided by the gear stage. Static only -- gravity holding, nothing
     accelerating -- so it under-states a moving robot; the safety factor is in the
     result, quote it. ``margin`` is null where gravity applies no torque about the
     axis at all, which is not a failure but an unbounded margin. Every argument here

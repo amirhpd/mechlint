@@ -15,7 +15,7 @@ from pydantic import BaseModel, computed_field, model_validator
 from mechlint.core.actuators import Actuator
 from mechlint.core.checks import CHECKS, CheckReport, Severity
 from mechlint.core.inertia import InertiaReport
-from mechlint.core.torque import TorqueCase, TorqueReport
+from mechlint.core.torque import JointTorque, TorqueCase, TorqueReport
 from mechlint.core.urdf import JointSummary, RobotSummary
 
 SEVERITY_ORDER = {Severity.FAIL: 0, Severity.WARN: 1, Severity.INFO: 2}
@@ -37,6 +37,8 @@ def _override_notes(overrides: dict[str, object]) -> list[str]:
     for name, value in overrides.items():
         if name == "payload_g" and isinstance(value, list):
             phrases.append("payload " + ", ".join(f"{float(g):g} g" for g in value))
+        elif name == "voltage_V" and isinstance(value, dict):
+            phrases += [f"{joint} at {float(volts):g} V" for joint, volts in value.items()]
         elif name == "voltage_V":
             phrases.append(f"{float(value):g} V")  # type: ignore[arg-type]
         elif name == "link_mass_g" and isinstance(value, dict):
@@ -325,7 +327,7 @@ def render_torque(report: TorqueReport) -> str:
                 f"gravity {_vector(report.gravity_m_s2)} m/s^2 from the {report.gravity_source}"
                 + (f" ({report.implied_mount})" if report.implied_mount else ""),
                 f"safety factor {report.safety_factor:g}",
-                f"{report.voltage_V:g} V" if report.voltage_V else "",
+                _supply(report),
                 f"{report.samples} pose" + ("" if report.samples == 1 else "s"),
                 f"payload at {report.payload_at}" if report.payload_at else "",
             )
@@ -360,11 +362,9 @@ def render_torque(report: TorqueReport) -> str:
         f"  margin = available / (worst torque × safety factor {report.safety_factor:g}); "
         "a joint passes at margin >= 1",
     ]
-    # One line per actuator, not per joint: five joints driven by the same servo cite
-    # the same datasheet, and printing it five times buries the notes underneath.
-    for key in dict.fromkeys(j.actuator for j in report.joints if j.judged):
-        joint = next(j for j in report.joints if j.actuator == key)
-        driven = [j.joint for j in report.joints if j.actuator == key]
+    # One line per drive, not per joint: five joints driven by the same servo on the same
+    # rail cite the same datasheet, and printing it five times buries the notes underneath.
+    for driven, joint in _drive_groups(report):
         footer.append(
             f"  {', '.join(driven)}: {joint.actuator_name} {joint.torque_basis}, "
             f"{joint.confidence} confidence — {joint.source_url}"
@@ -378,6 +378,27 @@ def render_torque(report: TorqueReport) -> str:
     if fixes:
         footer += ["", "how to fix:"] + [f"  {check}  {CHECKS[check].fix}" for check in fixes]
     return "\n".join([*header, *rows, *footer, *_skipped(report.skipped)])
+
+
+def _supply(report: TorqueReport) -> str:
+    """The supply for the header: one voltage, or a pointer to the per-joint ones."""
+    if report.voltage_V:
+        return f"{report.voltage_V:g} V"
+    supplies = {j.supply_V for j in report.joints if j.actuator is not None}
+    return "supply per joint" if len(supplies) > 1 else ""
+
+
+def _drive_groups(report: TorqueReport) -> list[tuple[list[str], JointTorque]]:
+    """Judged joints grouped by what drives them: same actuator, same basis.
+
+    Grouped on the basis and not on the actuator key, because one servo on two rails,
+    or behind a gear stage on only one joint, delivers two different torques.
+    """
+    groups: dict[tuple[str | None, str | None], list[JointTorque]] = {}
+    for joint in report.joints:
+        if joint.judged:
+            groups.setdefault((joint.actuator, joint.torque_basis), []).append(joint)
+    return [([j.joint for j in joints], joints[0]) for joints in groups.values()]
 
 
 def _payload_label(grams: float) -> str:
@@ -426,7 +447,7 @@ def torque_markdown(report: TorqueReport) -> str:
         "",
         f"`{report.source}` · gravity {_vector(report.gravity_m_s2)} m/s² from the "
         f"{report.gravity_source} · safety factor {report.safety_factor:g}"
-        + (f" · {report.voltage_V:g} V" if report.voltage_V else "")
+        + (f" · {_supply(report)}" if _supply(report) else "")
         + f" · {report.samples} pose{'' if report.samples == 1 else 's'}"
         + f" · **{'pass' if report.ok else 'fail'}**",
         "",
@@ -452,6 +473,14 @@ def torque_markdown(report: TorqueReport) -> str:
             + " | ".join(cells)
             + " |"
         )
+    drives = _drive_groups(report)
+    if drives:
+        lines.append("")
+        lines += [
+            f"- {', '.join(f'`{name}`' for name in driven)}: {joint.actuator_name} — "
+            f"{(joint.torque_basis or '').replace('N*m', 'N·m')}, {joint.confidence} confidence"
+            for driven, joint in drives
+        ]
     lines += ["", "| ID | Severity | Subject | Finding |", "|---|---|---|---|"]
     lines += [
         f"| [{f.check}](checks.md) | {f.severity.value} | `{f.subject}` | {f.message} |"

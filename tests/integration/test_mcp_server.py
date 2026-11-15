@@ -127,6 +127,18 @@ def test_torque_budget_echoes_the_overrides_it_was_given(config: str) -> None:
     assert payload["joints"][0]["voltage_V"] == 4.8
 
 
+def test_torque_budget_takes_a_voltage_per_joint(config: str) -> None:
+    """One rail per joint, as a real arm has: only the joints named change."""
+    payload = call("torque_budget", config=config, voltage={"joint_2": 4.8}, samples=64)
+    joints = {joint["joint"]: joint for joint in payload["joints"]}
+
+    assert payload["ok"] is not None and "error" not in payload, payload
+    assert payload["overrides"]["voltage_V"] == {"joint_2": 4.8}
+    assert joints["joint_2"]["supply_V"] == 4.8
+    assert joints["joint_1"]["supply_V"] == 6.0  # the fixture's actuators.voltage
+    assert payload["voltage_V"] is None  # two supplies now: read each joint's own
+
+
 def test_list_actuators_answers_what_would_fit_instead(config: str) -> None:
     payload = call("list_actuators", min_torque_Nm=2.0, voltage=6.8)
     entries = {entry["key"]: entry for entry in payload["actuators"]}

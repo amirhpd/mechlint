@@ -26,7 +26,14 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from mechlint.core import chain
 from mechlint.core.actuators import Actuator, ActuatorDatabase, bundled
 from mechlint.core.checks import Finding, Severity, finding
-from mechlint.core.config import MechlintConfig, applied_overrides
+from mechlint.core.config import (
+    JointDrive,
+    MechlintConfig,
+    Transmission,
+    applied_overrides,
+    joint_torque_basis,
+    joint_torque_limit,
+)
 from mechlint.core.geometry import Vec3
 from mechlint.core.inertia import InertiaReport, compute_inertia
 from mechlint.core.materials import Confidence
@@ -54,7 +61,15 @@ class TorqueCase(BaseModel):
         default_factory=dict, description="The configuration the maximum occurs at, in rad or m."
     )
     required_Nm: float | None = Field(
-        default=None, description="max_torque_Nm * safety_factor: what the actuator must beat."
+        default=None,
+        description="max_torque_Nm * safety_factor: what must be available at the joint.",
+    )
+    motor_required_Nm: float | None = Field(
+        default=None,
+        description="required_Nm divided by the joint's transmission (ratio x efficiency): "
+        "what a replacement actuator must deliver at its own shaft. Equal to required_Nm when "
+        "the joint has no transmission. This, not required_Nm, is what to search the "
+        "actuator database with.",
     )
     available_Nm: float | None = None
     margin: float | None = Field(
@@ -83,9 +98,28 @@ class JointTorque(BaseModel):
     actuator: str | None = None
     actuator_name: str | None = None
     torque_basis: str | None = Field(
-        default=None, description="What the available torque is, e.g. 'stall torque at 6 V'."
+        default=None,
+        description="What the available torque is, e.g. 'stall torque at 6 V', or with a "
+        "transmission 'stall torque at 5 V (0.059 N*m) x 2:1 stage x 0.95 efficiency'.",
     )
-    voltage_V: float | None = None
+    supply_V: float | None = Field(
+        default=None,
+        description="The supply this joint is judged at: a per-call override, else its own "
+        "voltage in mechlint.yaml, else actuators.voltage. Null means none was stated and the "
+        "actuator's recommended voltage was used.",
+    )
+    voltage_V: float | None = Field(
+        default=None,
+        description="The datasheet row the torque was read from. Differs from supply_V when "
+        "the supply is not a listed voltage; the notes then say which way that errs.",
+    )
+    motor_torque_Nm: float | None = Field(
+        default=None,
+        description="The actuator's own figure at its shaft, before any transmission.",
+    )
+    transmission: Transmission | None = Field(
+        default=None, description="The gear stage between actuator and joint, if any."
+    )
     confidence: Confidence | None = Field(
         default=None, description="Of the datasheet, not of the arithmetic."
     )
@@ -125,7 +159,11 @@ class TorqueReport(BaseModel):
     gravity_source: str = Field(description="'model' or 'config' -- who decided which way is down.")
     implied_mount: str | None = None
     safety_factor: float
-    voltage_V: float | None = None
+    voltage_V: float | None = Field(
+        default=None,
+        description="The supply every joint is judged at. Null when joints are on different "
+        "rails: read each joint's own supply_V then.",
+    )
     payloads_g: list[float] = Field(default_factory=list)
     payload_at: str | None = Field(default=None, description="The link a payload hangs from.")
     samples: int = 0
@@ -169,7 +207,7 @@ def torque_budget(
     inertia: InertiaReport | None = None,
     actuators: ActuatorDatabase | None = None,
     payloads_g: list[float] | None = None,
-    voltage: float | None = None,
+    voltage: float | Mapping[str, float] | None = None,
     assignments: Mapping[str, str | None] | None = None,
     mount: object | None = None,
     payload_at: str | None = None,
@@ -181,6 +219,11 @@ def torque_budget(
     Every keyword is an override of what ``mechlint.yaml`` says, so an LLM can ask
     "what if the payload were 200 g?" without editing the file -- and the report
     echoes the values it used, so the answer carries its own assumptions.
+
+    ``voltage`` is either one number -- every joint on that supply -- or
+    ``{joint: volts}`` for only the joints named. ``assignments`` swaps the actuator
+    and keeps the joint's own supply and transmission: the gear stage is part of
+    the arm, not of the motor.
     """
     if inertia is not None and link_masses_g:
         raise ValueError(
@@ -191,10 +234,9 @@ def torque_budget(
     scenario = config.scenario if config is not None else None
     urdf = model.urdf
 
-    supply = voltage if voltage is not None else (config.actuators.voltage if config else None)
+    default_supply = config.actuators.voltage if config is not None else None
     factor = scenario.safety_factor if scenario is not None else 2.0
-    assigned = dict(config.actuators.joints) if config is not None else {}
-    assigned.update(assignments or {})
+    drives = _drives(model, config, assignments, voltage)
 
     loads = _payloads(payloads_g, scenario)
     # An explicit mount overrides even the model: "what if it were on the ceiling?" is a
@@ -231,13 +273,15 @@ def torque_budget(
             tip_centre,
             loads,
             factor,
-            assigned,
+            drives.get(name),
             database,
-            supply,
             findings,
         )
         for name in joints
     ]
+    # A servo the config places on no side of its joint is not in any link's mass, so
+    # every torque below is light by its weight. The inertia report found it; say it here too.
+    findings.extend(f for f in report.findings if f.check == "D004")
 
     return TorqueReport(
         robot=model.name,
@@ -247,13 +291,13 @@ def torque_budget(
         gravity_source=down.source,
         implied_mount=down.implied_mount,
         safety_factor=factor,
-        voltage_V=supply,
+        voltage_V=_common_supply(results, voltage, default_supply),
         payloads_g=[load * 1e3 for load in loads],
         payload_at=hand,
         samples=count,
         overrides=applied_overrides(
             payload_g=payloads_g,
-            voltage_V=voltage,
+            voltage_V=dict(voltage) if isinstance(voltage, Mapping) else voltage,
             joint_actuators=dict(assignments or {}),
             mount=mount,
             payload_at=payload_at,
@@ -265,6 +309,63 @@ def torque_budget(
         findings=findings,
         skipped={"D001": "drift arrives in M4"},
     )
+
+
+def _drives(
+    model: RobotModel,
+    config: MechlintConfig | None,
+    assignments: Mapping[str, str | None] | None,
+    voltage: float | Mapping[str, float] | None,
+) -> dict[str, JointDrive | None]:
+    """Every joint's actuator, supply and transmission, with this call's overrides applied.
+
+    A voltage override naming a joint that does not exist is refused rather than
+    ignored: answering "joint_7 at 12 V" with the unchanged robot would look right.
+    """
+    default = config.actuators.voltage if config is not None else None
+    drives = config.actuators.drives() if config is not None else {}
+
+    for joint, key in (assignments or {}).items():
+        current = drives.get(joint)
+        if not key:
+            drives[joint] = None
+        elif current is None:
+            drives[joint] = JointDrive(actuator=key, voltage=default)
+        else:
+            drives[joint] = current.model_copy(update={"actuator": key})
+
+    if isinstance(voltage, Mapping):
+        for joint, volts in voltage.items():
+            if joint not in model.urdf.joint_map:
+                known = ", ".join(chain.dof_joints(model.urdf))
+                raise ValueError(f"no joint called {joint!r} to set a voltage for; it has: {known}")
+            if float(volts) <= 0.0:
+                raise ValueError(f"voltage for {joint!r} must be positive, got {volts:g} V")
+            current = drives.get(joint)
+            if current is not None:
+                drives[joint] = current.model_copy(update={"voltage": float(volts)})
+    elif voltage is not None:
+        if float(voltage) <= 0.0:
+            raise ValueError(f"voltage must be positive, got {voltage:g} V")
+        drives = {
+            joint: None if drive is None else drive.model_copy(update={"voltage": float(voltage)})
+            for joint, drive in drives.items()
+        }
+    return drives
+
+
+def _common_supply(
+    results: list[JointTorque],
+    voltage: float | Mapping[str, float] | None,
+    default: float | None,
+) -> float | None:
+    """The one supply the whole report is at, or None when the joints disagree."""
+    if voltage is not None and not isinstance(voltage, Mapping):
+        return float(voltage)
+    supplies = {j.supply_V for j in results if j.actuator is not None}
+    if len(supplies) > 1:
+        return None
+    return supplies.pop() if supplies else default
 
 
 def _payloads(payloads_g: list[float] | None, scenario: object) -> list[float]:
@@ -310,9 +411,8 @@ def _joint_torque(
     tip_centre: np.ndarray | None,
     loads: list[float],
     factor: float,
-    assigned: Mapping[str, str | None],
+    drive: JointDrive | None,
     database: ActuatorDatabase,
-    supply: float | None,
     findings: list[Finding],
 ) -> JointTorque:
     urdf = model.urdf
@@ -340,8 +440,14 @@ def _joint_torque(
         moment += np.cross(centre - pivot, mass * gravity)
     lever = np.cross(tip_centre - pivot, gravity) if tip_centre is not None else None
 
-    actuator, reason = _actuator(database, assigned.get(name), findings, name)
+    supply = drive.voltage if drive is not None else None
+    stage = drive.transmission if drive is not None else None
+    actuator, reason = _actuator(
+        database, drive.actuator if drive is not None else None, findings, name
+    )
     limit = actuator.torque_limit(supply) if actuator is not None else None
+    available = joint_torque_limit(limit.torque_Nm, stage) if limit is not None else None
+    basis = None if limit is None else joint_torque_basis(limit.basis, limit.torque_Nm, stage)
     effort = _effort(joint)
 
     notes: list[str] = []
@@ -363,13 +469,13 @@ def _joint_torque(
         peak = int(np.argmax(magnitude))
         worst = float(magnitude[peak])
         required = worst * factor
-        available = limit.torque_Nm if limit is not None else None
         cases.append(
             TorqueCase(
                 payload_kg=load,
                 max_torque_Nm=worst,
                 pose=_pose(urdf, poses, peak, scale),
                 required_Nm=required,
+                motor_required_Nm=required / stage.factor if stage is not None else required,
                 available_Nm=available,
                 margin=None
                 if available is None
@@ -394,8 +500,11 @@ def _joint_torque(
         downstream_mass_kg=held,
         actuator=None if actuator is None else actuator.key,
         actuator_name=None if actuator is None else actuator.name,
-        torque_basis=None if limit is None else limit.basis,
+        torque_basis=basis,
+        supply_V=None if actuator is None else supply,
         voltage_V=None if limit is None else limit.voltage_V,
+        motor_torque_Nm=None if limit is None else limit.torque_Nm,
+        transmission=stage if actuator is not None else None,
         confidence=None if actuator is None else actuator.confidence,
         source_url=None if actuator is None else actuator.source_url,
         effort_limit_Nm=effort,
@@ -487,6 +596,12 @@ def _t001(result: JointTorque) -> list[Finding]:
             f"needs {case.max_torque_Nm:.3g} N*m at {payload}, but {result.actuator_name} "
             f"gives {case.available_Nm:.3g} N*m ({result.torque_basis}, "
             f"{result.confidence} confidence) -- short by {short:.3g}x at safety factor "
-            f"{(case.required_Nm or 0.0) / case.max_torque_Nm:g}",
+            f"{(case.required_Nm or 0.0) / case.max_torque_Nm:g}"
+            + (
+                ""
+                if result.transmission is None
+                else f"; a replacement must give {case.motor_required_Nm:.3g} N*m at its own "
+                f"shaft, before the {result.transmission.ratio:g}:1 stage"
+            ),
         )
     ]

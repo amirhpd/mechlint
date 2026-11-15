@@ -76,10 +76,51 @@ mechlint check robot.urdf.xacro -s dm -p description=src/description
 mechlint inertia --write src/description/urdf/    # generates inertials.xacro, nothing else
 mechlint torque -P 0 -P 100 -P 200       # one column per payload; 0 g is always included
 mechlint torque --actuator joint_2=ds3225 -V 6.8  # what-if, without editing the file
+mechlint torque -V joint_2=12 -V joint_3=12        # only those joints on a 12 V rail
 mechlint torque --link-mass arm_1_link=80 --mount ceiling  # so is this
 mechlint torque --payload-at wrist_link --actuator-db my_servos.yaml
 mechlint actuators --min-torque 2.0 --max-mass 100 # what would fit instead
 ```
+
+The facts that are in neither the CAD nor the URDF live in `mechlint.yaml`, next to the
+description:
+
+```yaml
+robot:
+  description: urdf/arm.urdf.xacro
+  model_scale: 0.1                 # metres per URDF unit; this model is in decimetres
+
+materials:
+  default: { material: pla, infill: 0.30 }
+  links:
+    link_1: { measured_mass_g: 212 }   # weighed: wins over the estimate
+
+components:                        # mass that is not in the meshes
+  # List a servo under the link it is bolted to, the joint's parent or its child.
+  # With only `drives:` it sits on that joint, in the frame of the link you list it
+  # under; give `at: [x, y, z]` (URDF units) when it is off the axis.
+  base_link: [ { actuator: ds3240,      drives: joint_1 } ]   # bolted to the parent
+  link_1:    [ { actuator: ds51150_12v, drives: joint_2 } ]   # bolted to the child
+  link_2:    [ { actuator: n20_50,      drives: joint_3 } ]
+
+actuators:
+  voltage: 6.0                     # default for every joint that does not say otherwise
+  joints:
+    joint_1: ds3240                # short form: actuator only, default voltage
+    joint_2: { actuator: ds51150_12v, voltage: 12.0 }        # its own rail
+    joint_3:
+      actuator: n20_50
+      voltage: 5.0
+      # ratio = joint-side teeth / motor-side teeth: a small gear on the motor driving
+      # one twice its size is 2.0. Efficiency is optional; left out, the stage is ideal.
+      transmission: { ratio: 2.0, efficiency: 0.95 }
+    joint_4: null                  # no actuator yet: torque reported, not judged
+
+scenario: { mount: table, payload_g: 100, safety_factor: 2.0 }
+```
+
+Each joint is judged at its own voltage and against the torque that reaches the joint — through a
+transmission, the actuator's figure × ratio × efficiency, and the report names both numbers.
 
 Payload, voltage, actuator, actuator table, mounting, where the payload hangs and link mass are
 all **arguments, not file edits**: a what-if never touches `mechlint.yaml`, and the report prints

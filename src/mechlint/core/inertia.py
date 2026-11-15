@@ -25,7 +25,7 @@ from mechlint import __version__
 from mechlint.core import chain
 from mechlint.core.actuators import ActuatorDatabase
 from mechlint.core.actuators import bundled as bundled_actuators
-from mechlint.core.checks import Finding, Severity, finding
+from mechlint.core.checks import Finding, Severity, component_side_findings, finding
 from mechlint.core.config import MaterialSpec, MechlintConfig, applied_overrides
 from mechlint.core.geometry import MassProperties, Mat3, Vec3, mass_properties
 from mechlint.core.materials import MaterialDatabase, density_of
@@ -167,7 +167,7 @@ def compute_inertia(
     link overridden this way is deliberately not writable: a hypothetical must
     never reach the generated xacro.
     """
-    findings: list[Finding] = []
+    findings: list[Finding] = component_side_findings(model, config)
     overrides = _link_mass_overrides(model, link_masses_g)
     # Which links a joint actually holds up. Derived from the chain, never declared:
     # a link reachable from the root through only fixed joints is bolted to the world,
@@ -376,6 +376,19 @@ def _components(
     for entry in config.components.get(name, []):
         label = entry.actuator or entry.note or "component"
         position = _component_position(model, name, entry)
+        if position is None and entry.drives is not None:
+            # Placing it anyway would put the mass a whole link away from where it is,
+            # with nothing to say so; leaving it out is at least reported, here and as D004.
+            resolved.append(
+                ComponentMass(
+                    label=label,
+                    ok=False,
+                    error=_unplaced(model, name, entry.drives),
+                    hint="list it under the link it is bolted to (the joint's parent or "
+                    "child), or give it an `at:`",
+                )
+            )
+            continue
         if entry.mass_g is not None:
             resolved.append(
                 ComponentMass(
@@ -412,11 +425,19 @@ def _components(
 
 
 def _component_position(model: RobotModel, link: str, entry: object) -> Vec3 | None:
-    """Where a component sits in its link frame, in metres.
+    """Where a component sits in the frame of the link it is listed under, in metres.
 
     ``at`` is given in URDF units, like everything else a user types into a
-    description. A component that only says which joint it ``drives`` sits at
-    that joint's origin -- which is where a servo physically is.
+    description, and always wins. A component that only says which joint it
+    ``drives`` sits on that joint -- which is where a servo physically is -- and the
+    side it is listed on decides how that point is written:
+
+    * under the joint's **parent**, the joint origin is a translation in that frame;
+    * under the joint's **child**, the child frame sits on the joint by URDF
+      convention, so it is the child's own origin.
+
+    Under any other link, or driving a joint that does not exist, there is no
+    place to infer: None, and the caller reports it (D004, D003) rather than guess.
     """
     at = getattr(entry, "at", None)
     if at is not None:
@@ -425,9 +446,26 @@ def _component_position(model: RobotModel, link: str, entry: object) -> Vec3 | N
     if drives is None:
         return None
     joint = model.urdf.joint_map.get(drives)
-    if joint is None or joint.origin is None:
+    if joint is None:
+        return None
+    if link == joint.child:
+        return (0.0, 0.0, 0.0)
+    if link != joint.parent:
+        return None
+    if joint.origin is None:
         return (0.0, 0.0, 0.0)
     return _vec3(np.asarray(joint.origin, dtype=float)[:3, 3] * model.model_scale)
+
+
+def _unplaced(model: RobotModel, link: str, drives: str) -> str:
+    """Why a ``drives``-only component has no position."""
+    joint = model.urdf.joint_map.get(drives)
+    if joint is None:
+        return f"drives {drives!r}, which is not a joint in the model (D003)"
+    return (
+        f"listed under {link!r} but drives {drives!r}, which connects {joint.parent!r} and "
+        f"{joint.child!r}, so mechlint cannot tell where it sits (D004)"
+    )
 
 
 def _combine(bodies: list[_Body]) -> tuple[float, np.ndarray, np.ndarray]:
