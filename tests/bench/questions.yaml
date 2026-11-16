@@ -61,14 +61,15 @@
 - id: mg996r_at_joint_2
   question: Does an MG996R suffice at joint_2 with a 100 g payload?
   note: >-
-    The milestone's own done-when question. 1.65 N*m worst case against 1.079 N*m
-    of stall at 6 V, and a safety factor of 2 on top: a margin of 0.33.
+    The milestone's own done-when question. 1.65 N*m worst case against the 1.1 N*m
+    measured at 6 V, and a safety factor of 2 on top: a margin of 0.33.
   tool: torque_budget
   arguments: { config: "{dast1}/mechlint.yaml", payload_g: [100.0] }
   expect:
     - { path: "joints[joint=joint_2].cases[payload_kg=0.1].max_torque_Nm", value: 1.651, tol: 0.002 }
-    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].available_Nm", value: 1.079, tol: 1.0e-09 }
-    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].margin", value: 0.327, tol: 0.002 }
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].available_Nm", value: 1.1, tol: 1.0e-09 }
+    - { path: "joints[joint=joint_2].torque_basis", value: "measured torque at 6 V" }
+    - { path: "joints[joint=joint_2].cases[payload_kg=0.1].margin", value: 0.333, tol: 0.002 }
     - { path: "joints[joint=joint_2].cases[payload_kg=0.1].ok", value: false }
     - { path: "joints[joint=joint_2].confidence", value: low }
 
@@ -106,13 +107,13 @@
 - id: what_would_fit
   question: If the MG996R is too weak at joint_2, what should I buy instead?
   note: >-
-    The DS3240 reaches 3.30 N*m: its 5 V figure (36 kgf*cm) is used at 6 V, which
-    under-states it. Checked by key, not position, so a new entry cannot break it.
+    Nothing in the database reaches 3.30 N*m at 6 V. The DS3240's datasheet says it
+    would (3.53 N*m at 5 V), but it measured 2.36 N*m at 6 V. An empty result is the
+    answer: this is a geometry problem, not a motor-selection problem.
   tool: list_actuators
   arguments: { min_torque_Nm: 3.302, voltage: 6.0 }
   expect:
-    - { path: "actuators[key=ds3240].torque_at_voltage.torque_Nm", value: 3.530, tol: 1.0e-09 }
-    - { path: "actuators[key=ds3240].torque_at_voltage.basis", value: "stall torque at 5 V" }
+    - { path: "count", value: 0 }
 
 - id: what_fits_at_all
   question: What reaches 1 N*m at 6 V, and how much does each deliver there?
@@ -122,7 +123,8 @@
   tool: list_actuators
   arguments: { min_torque_Nm: 1.0, voltage: 6.0 }
   expect:
-    - { path: "actuators[key=ds3240].torque_at_voltage.torque_Nm", value: 3.530, tol: 1.0e-09 }
+    - { path: "actuators[key=ds3240].torque_at_voltage.torque_Nm", value: 2.36, tol: 1.0e-09 }
+    - { path: "actuators[key=ds3240].torque_at_voltage.basis", value: "measured torque at 6 V" }
     - { path: "actuators[key=ds3225].torque_at_voltage.torque_Nm", value: 2.059, tol: 1.0e-09 }
     - { path: "actuators[key=xc330_m288].torque_at_voltage.torque_Nm", value: 1.10, tol: 1.0e-09 }
 

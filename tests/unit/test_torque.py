@@ -154,13 +154,15 @@ def test_an_assigned_actuator_is_judged_against_its_stall_torque(tmp_path: Path)
     )
     joint = _joints(torque_budget(_model(tmp_path), config))["joint_2"]
 
+    limit = bundled()["mg996r"].torque_limit(6.0)
+
     assert joint.actuator_name == "MG996R"
-    assert joint.torque_basis == "stall torque at 6 V"
+    assert joint.torque_basis == limit.basis
     assert joint.confidence == "low"
-    # 0.5 kg at 0.25 m is 1.226 N*m against 1.079 N*m of stall, at safety factor 1.0.
-    assert joint.cases[0].available_Nm == pytest.approx(1.079)
-    assert joint.cases[0].margin == pytest.approx(1.079 / (0.5 * 0.25 * G))
-    assert joint.ok is False
+    # 0.5 kg at 0.25 m is 1.226 N*m against about 1.1 N*m, at safety factor 1.0.
+    assert joint.cases[0].available_Nm == pytest.approx(limit.torque_Nm)
+    assert joint.cases[0].margin == pytest.approx(limit.torque_Nm / (0.5 * 0.25 * G))
+    assert joint.ok is (limit.torque_Nm >= 0.5 * 0.25 * G)
 
 
 def test_a_joint_with_no_actuator_is_reported_but_not_judged(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mechlint.cli.main import app
+from mechlint.core.actuators import bundled
 from mechlint.core.checks import Severity, check_urdf
 from mechlint.core.config import MechlintConfig
 from mechlint.core.torque import torque_budget
@@ -41,8 +42,9 @@ TORQUE_BASELINE_NM = {
     "joint_6": (0.0110, 0.1826, 0.3542),
 }
 
-#: MG996R at 6 V, from the bundled database: 11 kgf*cm.
-MG996R_STALL_NM = 1.079
+#: MG996R at 6 V, read from the bundled database so a new figure does not break this file.
+MG996R_AT_6V = bundled()["mg996r"].torque_limit(6.0)
+MG996R_STALL_NM = MG996R_AT_6V.torque_Nm
 
 
 @pytest.fixture(scope="module")
@@ -140,7 +142,7 @@ def test_every_judged_joint_cites_a_sourced_datasheet(budget) -> None:
     assert len(judged) == 5
     for entry in judged:
         assert entry.actuator_name == "MG996R"
-        assert entry.torque_basis == "stall torque at 6 V"
+        assert entry.torque_basis == MG996R_AT_6V.basis
         assert entry.confidence == "low"
         assert entry.source_url.startswith("http")
 
@@ -168,12 +170,13 @@ def test_the_shoulder_yaw_has_an_unbounded_margin_not_a_zero_one(budget) -> None
 def test_u007_catches_the_twenty_newton_metre_effort_limits(
     model: RobotModel, config: MechlintConfig
 ) -> None:
-    """Every DAST-1 joint declares effort="20.0" against a servo that gives 1.079 N*m.
+    """Every DAST-1 joint declares effort="20.0" against a servo that gives about 1.1 N*m.
     A controller clamping at twenty times what the motor can do is not clamping."""
     findings = [f for f in check_urdf(model, config).findings if f.check == "U007"]
+    ratio = f"{20.0 / MG996R_STALL_NM:.3g}x"
 
     assert {f.subject for f in findings} == {f"joint_{i}" for i in range(1, 6)}
-    assert all("18.5x" in f.message for f in findings)
+    assert all(ratio in f.message for f in findings)
     assert all(f.severity is Severity.FAIL for f in findings)
 
 

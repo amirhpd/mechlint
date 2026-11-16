@@ -133,11 +133,14 @@ def test_each_joint_is_judged_at_its_own_supply(tmp_path: Path) -> None:
     report = torque_budget(_model(tmp_path), _config(tmp_path, MIXED), samples=64)
     joints = _joints(report)
 
+    at_12 = bundled()["ds51150_12v"].torque_limit(12.0)
+    at_6 = bundled()["mg996r"].torque_limit(6.0)
+
     assert joints["joint_1"].supply_V == 12.0
-    assert joints["joint_1"].torque_basis == "stall torque at 12 V"
-    assert joints["joint_1"].cases[0].available_Nm == pytest.approx(13.925)
+    assert joints["joint_1"].torque_basis == at_12.basis
+    assert joints["joint_1"].cases[0].available_Nm == pytest.approx(at_12.torque_Nm)
     assert joints["joint_2"].supply_V == 6.0
-    assert joints["joint_2"].torque_basis == "stall torque at 6 V"
+    assert joints["joint_2"].torque_basis == at_6.basis
     # Two rails: no single number describes the report, and it says so.
     assert report.voltage_V is None
     assert "supply per joint" in render_torque(report)
@@ -145,9 +148,12 @@ def test_each_joint_is_judged_at_its_own_supply(tmp_path: Path) -> None:
 
 
 def test_u007_judges_each_joint_at_its_own_supply(tmp_path: Path) -> None:
-    """joint_1 claims 13 N*m: within the DS51150 at 12 V (13.9), beyond it at its 10 V
-    row (12.3). joint_2 claims 0.1 N*m, well inside an MG996R at the default 6 V."""
-    report = check_urdf(_model(tmp_path), _config(tmp_path, MIXED))
+    """joint_1 claims just under what the DS51150 gives at 12 V. Judged at the global
+    6 V instead, it would be outside its 10-12.6 V range and U008 would fire. joint_2
+    claims 0.1 N*m, well inside an MG996R at the default 6 V."""
+    effort = 0.95 * bundled()["ds51150_12v"].torque_limit(12.0).torque_Nm
+    body = ARM.replace('effort="13"', f'effort="{effort:.3f}"')
+    report = check_urdf(_model(tmp_path, body), _config(tmp_path, MIXED))
 
     assert [f for f in report.findings if f.check in ("U007", "U008")] == []
 

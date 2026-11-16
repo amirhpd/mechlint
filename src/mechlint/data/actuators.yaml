@@ -12,6 +12,11 @@
 #                     pushes, not by the supply voltage, so keying it by volts would be
 #                     a lie. `rated_current_A` is the condition it holds at.
 #
+#   measured_torque_Nm voltage -> N*m, measured on the bench (stall, lever on a scale).
+#                     Optional. When present it is the ONLY torque mechlint uses for that
+#                     entry -- datasheet rows at other voltages are not mixed in. The
+#                     datasheet figures stay in the file so the gap stays visible.
+#
 # `price_hint` is deliberately empty everywhere. Prices move faster than this file and
 # none of the sources below quote one; an unsourced number sitting in a sourced database
 # is worse than a missing one. Fill it in your own overlay if you track cost.
@@ -26,6 +31,7 @@ actuators:
     vendor: TowerPro
     kind: hobby_servo
     stall_torque_Nm: { 4.8: 0.922, 6.0: 1.079 }
+    measured_torque_Nm: { 6.0: 1.1 }
     no_load_speed_rpm: { 4.8: 52.6, 6.0: 66.7 }
     recommended_voltage: 6.0
     voltage_range: [4.8, 6.6]
@@ -87,6 +93,7 @@ actuators:
     vendor: DSServo
     kind: hobby_servo
     stall_torque_Nm: { 5.0: 3.530, 6.8: 4.413 }
+    measured_torque_Nm: { 6.0: 2.36 }
     no_load_speed_rpm: { 5.0: 50.0, 6.8: 58.8 }
     recommended_voltage: 6.8
     voltage_range: [4.8, 6.8]
@@ -112,6 +119,7 @@ actuators:
     vendor: DSServo
     kind: hobby_servo
     stall_torque_Nm: { 10.0: 12.258, 12.0: 13.925, 12.6: 14.710 }
+    measured_torque_Nm: { 12.0: 11.04 }
     no_load_speed_rpm: { 10.0: 41.7, 12.0: 47.6, 12.6: 52.6 }
     recommended_voltage: 12.0
     voltage_range: [10.0, 12.6]

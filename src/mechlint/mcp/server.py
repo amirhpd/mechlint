@@ -365,11 +365,12 @@ def list_actuators(
 ) -> dict[str, Any]:
     """The actuator database: what each motor delivers, how heavy it is, and where that came from.
 
-    This is the "what would fit instead?" tool. Every torque is a datasheet figure,
-    never a measurement, and every entry carries ``confidence`` plus the ``source_url``
-    it was read from -- cite them. Torque is stored per supply voltage for servos and
-    as one holding torque for steppers, so a comparison across kinds only means
-    something at a stated voltage.
+    This is the "what would fit instead?" tool. Every torque is a datasheet figure
+    unless ``torque_at_voltage.basis`` says "measured torque" (a bench measurement,
+    which replaces the datasheet for that entry), and every entry carries
+    ``confidence`` plus the ``source_url`` it was read from -- cite them. Torque is
+    stored per supply voltage for servos and as one holding torque for steppers, so a
+    comparison across kinds only means something at a stated voltage.
     """
 
     def run() -> dict[str, Any]:

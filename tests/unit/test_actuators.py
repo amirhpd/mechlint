@@ -15,6 +15,7 @@ import pytest
 
 from mechlint.core.actuators import (
     KGFCM_TO_NM,
+    Actuator,
     ActuatorDatabase,
     TableNotFound,
     bundled,
@@ -146,9 +147,8 @@ def test_matching_answers_what_would_fit_instead() -> None:
     found = bundled().matching(min_torque_Nm=2.0, voltage=6.8, max_mass_g=100)
     keys = [a.key for a in found]
 
-    # Only the entries we know about are pinned, in order, so a new one can join the list.
-    known = ["ds3240", "ds3225", "ds3218"]  # strongest first
-    assert [key for key in keys if key in known] == known
+    # Membership, not positions: a new entry or a new measurement can reorder the list.
+    assert {"ds3240", "ds3225", "ds3218"} <= set(keys)
     assert "nema17_pg5" not in keys  # strong enough, but 520 g is over the 100 g limit
     torques = [a.torque_limit(6.8).torque_Nm for a in found]
     assert torques == sorted(torques, reverse=True)
@@ -184,6 +184,67 @@ def test_the_n20_5v_row_is_its_12v_datasheet_row_scaled() -> None:
     assert n20.stall_torque_Nm[5.0] == pytest.approx(n20.stall_torque_Nm[12.0] * 5 / 12, abs=5e-4)
     assert n20.no_load_speed_rpm[5.0] == pytest.approx(460.0 * 5 / 12, abs=0.05)
     assert "n20_50" in [a.key for a in bundled().matching(kind="dc_gearmotor")]
+
+
+def _servo(**changes: object):
+    """A made-up servo, so these rules are tested without leaning on bundled figures."""
+    base = bundled()["mg996r"].model_copy(
+        update={
+            "stall_torque_Nm": {4.8: 1.0, 6.0: 1.2},
+            "measured_torque_Nm": {6.0: 0.9},
+            "voltage_range": (4.8, 6.6),
+        }
+    )
+    return base.model_copy(update=changes)
+
+
+def test_a_measured_torque_replaces_the_datasheet() -> None:
+    limit = _servo().torque_limit(6.0)
+
+    assert limit.torque_Nm == 0.9
+    assert limit.basis == "measured torque at 6 V"
+    assert limit.overstates is False
+
+
+def test_above_the_measured_voltage_the_measurement_under_states() -> None:
+    """6.6 V has a datasheet row nowhere and a measurement only below it: use 6 V."""
+    limit = _servo().torque_limit(6.6)
+
+    assert limit.torque_Nm == 0.9
+    assert limit.exact is False
+    assert limit.overstates is False
+
+
+def test_below_the_measured_voltage_a_lower_datasheet_row_is_used() -> None:
+    """At 4.8 V the 6 V measurement over-states the part; the 4.8 V datasheet row is lower."""
+    servo = _servo(measured_torque_Nm={6.0: 1.1})
+    limit = servo.torque_limit(4.8)
+
+    assert limit.torque_Nm == 1.0
+    assert limit.basis == "stall torque at 4.8 V"
+    assert servo.runs_on(4.8)
+
+
+def test_below_the_measured_voltage_a_higher_datasheet_row_is_not_trusted() -> None:
+    """The datasheet says 1.0 at 4.8 V, but the part measured 0.9 at 6 V: the datasheet
+    is already shown to be optimistic, so the measurement is kept and flagged."""
+    servo = _servo()
+    limit = servo.torque_limit(4.8)
+
+    assert limit.torque_Nm == 0.9
+    assert limit.overstates is True
+    assert not servo.runs_on(4.8)
+
+
+def test_a_measured_table_alone_is_enough_torque() -> None:
+    servo = Actuator(
+        **{
+            **_servo().model_dump(exclude={"stall_torque_Nm"}),
+            "measured_torque_Nm": {6.0: 0.9},
+        }
+    )
+
+    assert servo.torque_limit(6.0).basis == "measured torque at 6 V"
 
 
 def test_matching_can_be_narrowed_to_one_kind() -> None:

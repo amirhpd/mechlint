@@ -11,6 +11,11 @@ Two kinds of limit, because two kinds of motor. A brushed servo's stall torque
 scales with its supply, so it is stored per voltage. A stepper's is set by the
 current its driver pushes, so keying it by volts would be a lie; it gets one
 ``holding_torque_Nm`` and the current it holds at.
+
+A bench measurement beats both. ``measured_torque_Nm`` is stored per voltage, and
+when an entry has one it is the only table used for that actuator: datasheet rows at
+other voltages are not mixed in, because a part that measures 35% under its
+datasheet at one voltage is not going to meet it at the next.
 """
 
 from __future__ import annotations
@@ -57,6 +62,11 @@ class TorqueLimit(BaseModel):
         default=True, description="Whether the voltage asked for is one the datasheet lists."
     )
     note: str | None = None
+    overstates: bool = Field(
+        default=False,
+        description="True when no figure at or below the voltage asked for exists, so the "
+        "one used is from a higher voltage and claims more than the part delivers there.",
+    )
 
 
 class Actuator(BaseModel):
@@ -71,6 +81,11 @@ class Actuator(BaseModel):
 
     stall_torque_Nm: dict[float, float] = Field(
         default_factory=dict, description="Supply voltage -> stall torque. Servos."
+    )
+    measured_torque_Nm: dict[float, float] = Field(
+        default_factory=dict,
+        description="Supply voltage -> torque measured on the bench. When present, used "
+        "instead of every datasheet figure.",
     )
     holding_torque_Nm: float | None = Field(
         default=None, gt=0.0, description="Torque at the rated current. Steppers."
@@ -99,10 +114,15 @@ class Actuator(BaseModel):
 
     @model_validator(mode="after")
     def _has_a_torque(self) -> Actuator:
-        if not self.stall_torque_Nm and self.holding_torque_Nm is None:
+        if (
+            not self.stall_torque_Nm
+            and self.holding_torque_Nm is None
+            and not self.measured_torque_Nm
+        ):
             raise ValueError(
                 f"actuator {self.key!r} has no torque: give stall_torque_Nm "
-                "{voltage: N*m} for a servo or DC gearmotor, or holding_torque_Nm for a stepper"
+                "{voltage: N*m} for a servo or DC gearmotor, holding_torque_Nm for a stepper, "
+                "or measured_torque_Nm {voltage: N*m}"
             )
         return self
 
@@ -117,7 +137,27 @@ class Actuator(BaseModel):
         takes the highest listed one *at or below* it, which under-states rather
         than invents -- and says so, so a report can print "at 4.8 V" next to a
         robot running on 5 V instead of a number nobody measured.
+
+        A ``measured_torque_Nm`` table, when there is one, replaces the datasheet under
+        the same never-interpolate rules. One exception: below every measured voltage the
+        measurement would over-state the part, so a datasheet row at or below that voltage
+        is used instead -- but only when it is the lower of the two.
         """
+        if self.measured_torque_Nm:
+            measured = _lookup(
+                self.measured_torque_Nm, "measured torque", "measured", voltage, self
+            )
+            if not measured.overstates or not self.stall_torque_Nm:
+                return measured
+            datasheet = _lookup(self.stall_torque_Nm, "stall torque", "listed", voltage, self)
+            if datasheet.overstates or datasheet.torque_Nm >= measured.torque_Nm:
+                return measured
+            return datasheet.model_copy(
+                update={
+                    "note": f"below every measured voltage; the datasheet's {datasheet.basis} "
+                    f"is used because it is lower than the {measured.voltage_V:g} V measurement"
+                }
+            )
         if self.holding_torque_Nm is not None:
             current = f" at {self.rated_current_A:g} A" if self.rated_current_A else ""
             return TorqueLimit(
@@ -130,40 +170,7 @@ class Actuator(BaseModel):
                 ),
             )
 
-        wanted = voltage if voltage is not None else self.recommended_voltage
-        listed = sorted(self.stall_torque_Nm)
-        if wanted is None:
-            wanted = listed[-1]
-
-        for candidate in listed:
-            if abs(candidate - wanted) < 1e-9:
-                return TorqueLimit(
-                    torque_Nm=self.stall_torque_Nm[candidate],
-                    basis=f"stall torque at {candidate:g} V",
-                    voltage_V=candidate,
-                )
-
-        below = [v for v in listed if v < wanted]
-        if below:
-            used = below[-1]
-            return TorqueLimit(
-                torque_Nm=self.stall_torque_Nm[used],
-                basis=f"stall torque at {used:g} V",
-                voltage_V=used,
-                exact=False,
-                note=f"{wanted:g} V is not a listed voltage; the {used:g} V figure is used, "
-                "which under-states this actuator",
-            )
-
-        used = listed[0]
-        return TorqueLimit(
-            torque_Nm=self.stall_torque_Nm[used],
-            basis=f"stall torque at {used:g} V",
-            voltage_V=used,
-            exact=False,
-            note=f"{wanted:g} V is below every listed voltage; the {used:g} V figure is used, "
-            "which OVER-states what this actuator delivers on that supply",
-        )
+        return _lookup(self.stall_torque_Nm, "stall torque", "listed", voltage, self)
 
     def voltage_note(self, voltage: float | None) -> str | None:
         """Whether a supply is outside what the vendor says the part tolerates."""
@@ -179,16 +186,62 @@ class Actuator(BaseModel):
     def runs_on(self, voltage: float | None) -> bool:
         """Whether this supply gives a torque figure that can be trusted.
 
-        False when the supply is outside the vendor's operating range, or -- with no
-        range given -- below every voltage the stall table lists, where the only figure
-        available OVER-states the actuator. Either way, ranking it would recommend a
+        False when the supply is outside the vendor's operating range, or when the
+        only figure available is from a higher voltage and so OVER-states the actuator.
+        Either way, ranking it would recommend a
         part that cannot deliver on that supply.
         """
         if voltage is None:
             return True
         if self.voltage_note(voltage) is not None:
             return False
-        return not (self.stall_torque_Nm and voltage < min(self.stall_torque_Nm) - 1e-9)
+        return not self.torque_limit(voltage).overstates
+
+
+def _lookup(
+    table: dict[float, float],
+    label: str,
+    listed_as: str,
+    voltage: float | None,
+    actuator: Actuator,
+) -> TorqueLimit:
+    """One voltage-keyed table read without interpolating: the exact row, else the
+    highest one below (under-states), else the lowest one (OVER-states, and says so)."""
+    wanted = voltage if voltage is not None else actuator.recommended_voltage
+    listed = sorted(table)
+    if wanted is None:
+        wanted = listed[-1]
+
+    for candidate in listed:
+        if abs(candidate - wanted) < 1e-9:
+            return TorqueLimit(
+                torque_Nm=table[candidate],
+                basis=f"{label} at {candidate:g} V",
+                voltage_V=candidate,
+            )
+
+    below = [v for v in listed if v < wanted]
+    if below:
+        used = below[-1]
+        return TorqueLimit(
+            torque_Nm=table[used],
+            basis=f"{label} at {used:g} V",
+            voltage_V=used,
+            exact=False,
+            note=f"{wanted:g} V is not a {listed_as} voltage; the {used:g} V figure is used, "
+            "which under-states this actuator",
+        )
+
+    used = listed[0]
+    return TorqueLimit(
+        torque_Nm=table[used],
+        basis=f"{label} at {used:g} V",
+        voltage_V=used,
+        exact=False,
+        overstates=True,
+        note=f"{wanted:g} V is below every {listed_as} voltage; the {used:g} V figure is used, "
+        "which OVER-states what this actuator delivers on that supply",
+    )
 
 
 class ActuatorDatabase(BaseModel):

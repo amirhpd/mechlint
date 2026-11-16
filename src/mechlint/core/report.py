@@ -508,8 +508,8 @@ def render_actuators(actuators: list[Actuator], *, voltage: float | None = None)
         "",
         f"  {len(actuators)} actuators"
         + (f" at {voltage:g} V" if voltage is not None else " at their recommended voltage"),
-        "  every torque above is a datasheet figure, not a measurement; `conf` is how much "
-        "the source is worth",
+        "  every torque above is a datasheet figure unless its basis says measured; "
+        "`conf` is how much the datasheet is worth",
     ]
     return "\n".join(lines)
 
@@ -532,6 +532,17 @@ def _detail_rows(actuator: Actuator) -> list[tuple[str, str]]:
         ("name", f"{actuator.name} ({actuator.vendor})"),
         ("kind", actuator.kind),
     ]
+    if actuator.measured_torque_Nm:
+        rows.append(
+            (
+                "measured torque",
+                ", ".join(
+                    f"{value:.3f} N*m @ {volts:g} V"
+                    for volts, value in sorted(actuator.measured_torque_Nm.items())
+                )
+                + "  (used instead of the datasheet)",
+            )
+        )
     if actuator.stall_torque_Nm:
         rows.append(
             (
@@ -591,8 +602,8 @@ def actuators_markdown(actuators: list[Actuator], *, voltage: float | None = Non
         "",
         "Torque at "
         + (f"{voltage:g} V" if voltage is not None else "each entry's recommended voltage")
-        + ". Every figure is a datasheet number, never a measurement — `confidence` says how "
-        "much the source is worth.",
+        + ". Every figure is a datasheet number unless its basis says measured — `confidence` "
+        "says how much the datasheet is worth.",
         "",
         "| Key | Name | Vendor | Torque | Mass | Confidence | Basis | Source |",
         "|---|---|---|---|---|---|---|---|",

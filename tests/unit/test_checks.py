@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from mechlint.core.actuators import bundled
 from mechlint.core.checks import CHECKS, Severity, check_urdf
 from mechlint.core.config import MechlintConfig
 from mechlint.core.urdf import RobotModel
@@ -310,15 +311,16 @@ def _with_config(tmp_path: Path, yaml: str, body: str = SANE):
 
 
 def test_u007_catches_an_effort_limit_no_servo_can_reach(tmp_path: Path) -> None:
-    """The SANE arm declares effort=5 N*m. An MG996R gives 1.079 N*m at 6 V, so a
+    """The SANE arm declares effort=5 N*m. An MG996R gives about 1.1 N*m at 6 V, so a
     controller clamping at 5 never clamps at all."""
     report = _with_config(tmp_path, "actuators: { voltage: 6.0, joints: { j1: mg996r } }")
     (u007,) = [f for f in report.findings if f.check == "U007"]
+    limit = bundled()["mg996r"].torque_limit(6.0)
 
     assert u007.severity is Severity.FAIL
     assert u007.subject == "j1"
-    assert "4.63x" in u007.message
-    assert "stall torque at 6 V" in u007.message
+    assert f"{5.0 / limit.torque_Nm:.3g}x" in u007.message
+    assert limit.basis in u007.message
 
 
 def test_u007_is_quiet_when_the_limit_is_honest(tmp_path: Path) -> None:
