@@ -167,16 +167,18 @@ def test_the_shoulder_yaw_has_an_unbounded_margin_not_a_zero_one(budget) -> None
 # --------------------------------------------------------------------------- U007
 
 
-def test_u007_catches_the_twenty_newton_metre_effort_limits(
+def test_u007_catches_the_twenty_unit_effort_limits(
     model: RobotModel, config: MechlintConfig
 ) -> None:
     """Every DAST-1 joint declares effort="20.0" against a servo that gives about 1.1 N*m.
-    A controller clamping at twenty times what the motor can do is not clamping."""
+    The model is in decimetres, so 20 model-N*m is 2 N*m real: still nearly twice what
+    the motor can do, and a controller clamping there is not clamping."""
     findings = [f for f in check_urdf(model, config).findings if f.check == "U007"]
-    ratio = f"{20.0 / MG996R_STALL_NM:.3g}x"
+    ratio = f"{20.0 * model.model_scale / MG996R_STALL_NM:.3g}x"
 
     assert {f.subject for f in findings} == {f"joint_{i}" for i in range(1, 6)}
     assert all(ratio in f.message for f in findings)
+    assert all("20 model-N*m = 2 N*m real" in f.message for f in findings)
     assert all(f.severity is Severity.FAIL for f in findings)
 
 

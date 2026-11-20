@@ -50,7 +50,7 @@ It is wrong in useful ways — every one of these is a check mechlint has to cat
 - **Every inertia tensor is a placeholder**, `ixx = iyy = izz = 1.0`, from a `default_inertial`
   macro, on all eight links. → **U005**
 - **Masses are round guesses**, `{0.2, 0.05, 0.1, 0.01, 0.5}` kg, none measured. → **U006**
-- **Every joint declares `effort="20.0"` N·m** while the MG996R behind it stalls near 1.1 N·m. A
+- **Every joint declares `effort="20.0"`** — 2 N·m real in this decimetre model (effort × `model_scale`, which is how U007 reads it) — while the MG996R behind it stalls near 1.1 N·m. A
   controller tuned against that limit is tuned against fiction. → **U007**
 - **Two visual meshes are not closed volumes**, `arm_1.stl` and `base.stl`, which is ordinary for
   professional-CAD STL exports and makes their mass properties unreliable. → **M001**

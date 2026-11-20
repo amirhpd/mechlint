@@ -60,3 +60,19 @@ def g_to_kg(grams: float) -> float:
 
 def kg_to_g(kilograms: float) -> float:
     return kilograms * 1e3
+
+
+def effort_to_real(effort: float, model_scale: float) -> float:
+    """Real N*m from a URDF ``<limit effort>``.
+
+    A simulator reads every length as metres, so on a model in decimetres each lever
+    arm is ten times too long, and so is every torque gravity puts on a joint. The
+    effort has to be in those same inflated units to hold the arm: torque scales with
+    length (mass does not -- the masses are real kg), so real = effort x model_scale.
+    """
+    return effort * model_scale
+
+
+def real_to_effort(torque_Nm: float, model_scale: float) -> float:
+    """The ``<limit effort>`` a real torque needs on a model in this length unit."""
+    return torque_Nm / model_scale

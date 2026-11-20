@@ -330,6 +330,60 @@ def test_u007_is_quiet_when_the_limit_is_honest(tmp_path: Path) -> None:
     assert "U007" not in _ids(report)
 
 
+#: The DAST-1 shoulder: a DS51150 on its own 12 V rail, bench-measured at 11.04 N*m.
+DS51150 = "actuators: { joints: { j1: { actuator: ds51150_12v, voltage: 12.0 } } }"
+
+
+def _u007(tmp_path: Path, effort: str, *, model_scale: float):
+    """U007 findings for the SANE arm with this effort, at this model scale."""
+    path = tmp_path / "mechlint.yaml"
+    path.write_text("robot: { description: test.urdf }\n" + DS51150)
+    body = SANE.replace('effort="5"', f'effort="{effort}"')
+    model = RobotModel.load(write_urdf(tmp_path, body), model_scale=model_scale)
+    return [
+        f for f in check_urdf(model, MechlintConfig.from_yaml(path)).findings if f.check == "U007"
+    ]
+
+
+def test_u007_on_a_metre_model_reads_effort_as_real_newton_metres(tmp_path: Path) -> None:
+    """Scale 1 is unchanged: the stall torque passes, a little more fails, and a low
+    limit is not flagged -- in metres there is nothing to forget to scale."""
+    assert _u007(tmp_path, "11.04", model_scale=1.0) == []
+    assert _u007(tmp_path, "2", model_scale=1.0) == []
+
+    (over,) = _u007(tmp_path, "12", model_scale=1.0)
+    assert over.severity is Severity.FAIL
+    assert "<limit effort> is 12 N*m, but" in over.message
+    assert "model-N*m" not in over.message
+
+
+def test_u007_accepts_effort_scaled_to_a_decimetre_model(tmp_path: Path) -> None:
+    """DAST-1 in Gazebo: effort = stall / model_scale held joint_2 exactly where it was
+    commanded, because the simulator's lever arms are ten times the real ones."""
+    assert _u007(tmp_path, "110.4", model_scale=0.1) == []
+    assert _u007(tmp_path, "60", model_scale=0.1) == []  # a deliberate lower clamp
+
+
+def test_u007_warns_when_a_decimetre_model_uses_the_real_stall_torque(tmp_path: Path) -> None:
+    """effort = 11.04 on DAST-1 let the arm fall to its limit: in the simulator's units
+    that is a tenth of the servo. Copied from the datasheet, never scaled."""
+    (unscaled,) = _u007(tmp_path, "11.04", model_scale=0.1)
+
+    assert unscaled.severity is Severity.WARN
+    assert "11.04 model-N*m = 1.104 N*m real" in unscaled.message
+    assert "needs 110.4 model-N*m" in unscaled.message
+    assert "10% of its torque" in unscaled.message
+
+
+def test_u007_fails_effort_above_the_scaled_stall_torque(tmp_path: Path) -> None:
+    (over,) = _u007(tmp_path, "120", model_scale=0.1)
+
+    assert over.severity is Severity.FAIL
+    assert "120 model-N*m = 12 N*m real" in over.message
+    assert f"{12.0 / 11.04:.3g}x" in over.message
+    assert "the most it can be is 110.4 model-N*m" in over.message
+
+
 def test_u007_says_it_did_not_run_rather_than_passing(tmp_path: Path) -> None:
     """Silence about a check nobody gave the inputs for reads as a pass. It is not one."""
     assert "U007" in _with_config(tmp_path, "actuators: { joints: { j1: null } }").skipped

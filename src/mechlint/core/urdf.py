@@ -23,7 +23,7 @@ import trimesh
 import yourdfpy
 from pydantic import BaseModel, ConfigDict, Field
 
-from mechlint.core import chain
+from mechlint.core import chain, units
 from mechlint.core.geometry import Vec3, load_mesh
 
 XACRO_SUFFIXES = (".xacro",)
@@ -381,7 +381,7 @@ class RobotModel:
             reach_link=reach_link,
             actuated_joints=list(self.urdf.actuated_joint_names),
             links=[self._link_summary(name, name in moving) for name in self.link_names],
-            joints=[_joint_summary(joint) for joint in self.urdf.robot.joints],
+            joints=[_joint_summary(joint, self.model_scale) for joint in self.urdf.robot.joints],
         )
 
     def _link_summary(self, name: str, moves: bool) -> LinkSummary:
@@ -399,8 +399,9 @@ class RobotModel:
         )
 
 
-def _joint_summary(joint: yourdfpy.Joint) -> JointSummary:
+def _joint_summary(joint: yourdfpy.Joint, model_scale: float) -> JointSummary:
     limit = joint.limit
+    effort = None if limit is None else limit.effort
     origin = None if joint.origin is None else np.asarray(joint.origin, dtype=float)[:3, 3]
     return JointSummary(
         name=joint.name,
@@ -411,7 +412,8 @@ def _joint_summary(joint: yourdfpy.Joint) -> JointSummary:
         origin_xyz=None if origin is None else _vec3(origin),
         lower=None if limit is None else limit.lower,
         upper=None if limit is None else limit.upper,
-        effort=None if limit is None else limit.effort,
+        effort=effort,
+        effort_Nm=None if effort is None else units.effort_to_real(effort, model_scale),
         velocity=None if limit is None else limit.velocity,
     )
 
@@ -434,7 +436,14 @@ class JointSummary(BaseModel):
     origin_xyz: Vec3 | None = Field(default=None, description="In the parent frame, URDF units.")
     lower: float | None = None
     upper: float | None = None
-    effort: float | None = Field(default=None, description="<limit effort>, N*m. Check U007.")
+    effort: float | None = Field(
+        default=None,
+        description="<limit effort> as written, in the simulator's units: the model's length "
+        "unit read as metres. Real N*m only on a model in metres; see effort_Nm. Check U007.",
+    )
+    effort_Nm: float | None = Field(
+        default=None, description="<limit effort> in real N*m: effort x model_scale."
+    )
     velocity: float | None = None
 
 

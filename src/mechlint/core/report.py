@@ -131,7 +131,21 @@ def _axis_limits(joint: JointSummary) -> tuple[str, str, str]:
         if joint.lower is None or joint.upper is None
         else f"{joint.lower:+.2f} .. {joint.upper:+.2f}"
     )
-    return axis, span, "—" if joint.effort is None else f"{joint.effort:g} N*m"
+    return axis, span, _effort(joint)
+
+
+def _effort(joint: JointSummary) -> str:
+    """Effort in real N*m, with the URDF's own figure beside it when the model is not in metres.
+
+    The URDF number is in the simulator's units -- lengths read as metres -- so on a
+    decimetre model it is ten times the real torque. Printing it bare as N*m is how
+    a correctly scaled limit came to look like a tenfold over-claim.
+    """
+    if joint.effort is None or joint.effort_Nm is None:
+        return "—"
+    if joint.effort == joint.effort_Nm:
+        return f"{joint.effort:g} N*m"
+    return f"{joint.effort_Nm:.4g} N*m ({joint.effort:g} in URDF)"
 
 
 def _columns(headings: tuple[str, ...], rows: list[tuple[str, ...]]) -> list[str]:

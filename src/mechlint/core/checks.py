@@ -77,9 +77,11 @@ CHECKS: dict[str, CheckSpec] = {
         ),
         CheckSpec(
             "U007",
-            "Joint effort limit exceeds the actuator's stall torque",
-            "Lower <limit effort> to what the servo delivers at the joint; a controller tuned "
-            "against fiction is untuned.",
+            "Joint effort limit does not match the actuator's stall torque",
+            "Set <limit effort> to what the servo delivers at the joint, divided by "
+            "robot.model_scale: a simulator reads lengths as metres, so torques are in model "
+            "units too. Too high and a controller is tuned against fiction; left unscaled and "
+            "the joint sags in simulation.",
         ),
         CheckSpec(
             "U008",
@@ -242,14 +244,25 @@ def _u007_effort_limits(
 
     The effort limit is what a controller clamps its command to, so a fictional one
     means the clamp never engages and the joint is tuned against a motor nobody owns.
-    URDF states effort in N*m whatever length unit the model uses, so this comparison
-    needs no scaling -- and stall torque is the right side to compare against, not
-    rated torque: the limit is a ceiling, and stall is the ceiling. Each joint is
-    judged at its own supply, and against what reaches the *joint*: through a 2:1
-    stage, that is twice the motor's figure.
+    Stall torque is the right side to compare against, not rated torque: the limit is
+    a ceiling, and stall is the ceiling. Each joint is judged at its own supply, and
+    against what reaches the *joint*: through a 2:1 stage, that is twice the motor's
+    figure.
+
+    Effort is in the *simulator's* units, not real N*m. A simulator reads every length
+    as metres, so on a decimetre model each lever arm -- and each gravity torque -- is
+    ten times the real one, and the effort must be too: the ceiling is the joint torque
+    / model_scale (``units.effort_to_real``). Above it: FAIL, as on a metre model.
+    On a model smaller than metres, an effort at or below the *real* stall torque is
+    the other way to get this wrong -- the limit was copied from the datasheet and never
+    scaled, and in simulation the joint gets a fraction of its torque and sags. That is
+    a WARN: a low clamp promises nothing the servo cannot do, and a limit set low on
+    purpose looks the same from the URDF; whether it still holds the arm is
+    ``mechlint torque``'s question.
     """
     if config is None:
         return
+    scale = model.model_scale
     for name, drive in config.actuators.drives().items():
         joint = model.urdf.joint_map.get(name)
         if drive is None or joint is None:
@@ -264,24 +277,55 @@ def _u007_effort_limits(
             continue
         limit = actuator.torque_limit(drive.voltage)
         available = joint_torque_limit(limit.torque_Nm, drive.transmission)
-        if float(effort) > available * (1.0 + 1e-9):
-            basis = joint_torque_basis(limit.basis, limit.torque_Nm, drive.transmission)
-            # The fallback notes are what make the number quotable: "12.3 N*m at 10 V" for a
-            # 6 V supply is a figure the servo never reaches, and the message must say so.
-            caveats = [
-                note
-                for note in (limit.note, actuator.voltage_note(drive.voltage))
-                if note is not None
-            ]
+        declared = float(effort)
+        real = units.effort_to_real(declared, scale)
+        ceiling = units.real_to_effort(available, scale)
+        too_high = real > available * (1.0 + 1e-9)
+        # Only below metres does "copied, not scaled" land under the ceiling; above
+        # metres the same mistake lands over it, and too_high already catches it.
+        unscaled = scale < 1.0 and declared <= available * (1.0 + 1e-9)
+        if not (too_high or unscaled):
+            continue
+        basis = joint_torque_basis(limit.basis, limit.torque_Nm, drive.transmission)
+        # The fallback notes are what make the number quotable: "12.3 N*m at 10 V" for a
+        # 6 V supply is a figure the servo never reaches, and the message must say so.
+        caveats = "".join(
+            f"; {note}"
+            for note in (limit.note, actuator.voltage_note(drive.voltage))
+            if note is not None
+        )
+        claimed = _effort_text(declared, scale)
+        drive_gives = f"{actuator.name} gives {available:.3g} N*m at the joint ({basis})"
+        if too_high:
+            scaled = (
+                ""
+                if scale == 1.0
+                else f"; at model_scale {scale:g} the most it can be is {ceiling:.4g} model-N*m"
+            )
             yield finding(
                 "U007",
                 Severity.FAIL,
                 name,
-                f"<limit effort> is {float(effort):g} N*m, but {actuator.name} gives "
-                f"{available:.3g} N*m at the joint ({basis}) -- "
-                f"{float(effort) / available:.3g}x what the drive can deliver"
-                + "".join(f"; {caveat}" for caveat in caveats),
+                f"<limit effort> is {claimed}, but {drive_gives} -- "
+                f"{real / available:.3g}x what the drive can deliver{scaled}{caveats}",
             )
+        else:
+            yield finding(
+                "U007",
+                Severity.WARN,
+                name,
+                f"<limit effort> is {claimed}, but {drive_gives} -- looks copied without "
+                f"scaling: at model_scale {scale:g} the simulator needs {ceiling:.4g} "
+                f"model-N*m, and this limit gives the joint {real / available:.0%} of its "
+                f"torque{caveats}",
+            )
+
+
+def _effort_text(effort: float, scale: float) -> str:
+    """``<limit effort>`` as written, and as real N*m when the two differ."""
+    if scale == 1.0:
+        return f"{effort:g} N*m"
+    return f"{effort:g} model-N*m = {units.effort_to_real(effort, scale):.4g} N*m real"
 
 
 def _u008_supply_ranges(

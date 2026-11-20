@@ -69,6 +69,12 @@ call list_actuators with min_torque_Nm set to the failing case's motor_required_
 the required torque divided by any transmission -- and voltage set to that joint's
 supply_V, to say what would fit instead.
 
+A URDF's <limit effort> is in the simulator's units, not real N*m: the simulator reads
+lengths as metres, so on a model with model_scale 0.1 a correct effort is the real
+torque x 10. inspect_robot's `effort` and torque_budget's `effort_limit_model` are the
+URDF figure as written; `effort_Nm` and `effort_limit_Nm` are real N*m. Compare real
+with real, and quote both when model_scale is not 1.
+
 Answer what-if questions with arguments, never by editing mechlint.yaml: payload_g,
 voltage, joint_actuators, actuator_db, mount, payload_at and link_mass_g all override
 the file for one call and come back in the result's `overrides`. Quote them alongside

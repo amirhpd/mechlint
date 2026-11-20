@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from mechlint.core import chain
+from mechlint.core import chain, units
 from mechlint.core.actuators import Actuator, ActuatorDatabase, bundled
 from mechlint.core.checks import Finding, Severity, finding
 from mechlint.core.config import (
@@ -125,7 +125,14 @@ class JointTorque(BaseModel):
     )
     source_url: str | None = None
     effort_limit_Nm: float | None = Field(
-        default=None, description="What the URDF's <limit effort> claims. See U007."
+        default=None,
+        description="The URDF's <limit effort> converted to real N*m (effort x model_scale), "
+        "so it compares directly with available_Nm. See U007.",
+    )
+    effort_limit_model: float | None = Field(
+        default=None,
+        description="<limit effort> as written, in the simulator's units: the model's length "
+        "unit read as metres. Equals effort_limit_Nm on a model in metres.",
     )
 
     cases: list[TorqueCase] = Field(default_factory=list)
@@ -507,7 +514,8 @@ def _joint_torque(
         transmission=stage if actuator is not None else None,
         confidence=None if actuator is None else actuator.confidence,
         source_url=None if actuator is None else actuator.source_url,
-        effort_limit_Nm=effort,
+        effort_limit_Nm=None if effort is None else units.effort_to_real(effort, scale),
+        effort_limit_model=effort,
         cases=cases,
         notes=notes,
     )
